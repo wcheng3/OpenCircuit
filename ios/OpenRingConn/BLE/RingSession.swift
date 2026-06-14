@@ -66,6 +66,10 @@ final class RingSession: NSObject {
     /// Updates `liveHR`/`liveSpO2`. Idempotent.
     func startLiveMonitoring() {
         guard monitorTask == nil else { return }
+        // Live and history sync can't coexist (ring is one mode at a time). Cancel any
+        // in-flight sync so the ring is free to enter live mode.
+        syncTask?.cancel(); syncTask = nil
+        syncing = false
         monitoring = true
         let modeCmd = liveMode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
         // Proven-accepted cursor (0xFFFFFFFF), then enter the selected live mode.

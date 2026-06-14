@@ -115,7 +115,7 @@ struct ContentView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(active ? color : Color(.systemGray3))
-        .disabled(session?.ready != true)
+        .disabled(session?.ready != true || session?.syncing == true)   // no live while syncing
     }
 
     // MARK: Sync + Health
@@ -135,8 +135,12 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(session?.ready != true || session?.syncing == true)
+            .disabled(session?.ready != true || session?.syncing == true
+                      || session?.monitoring == true)   // stop live before syncing
 
+            if session?.monitoring == true {
+                Text("Stop live HR/SpO₂ before syncing.").font(.caption2).foregroundStyle(.secondary)
+            }
             if let status = session?.syncStatus, session?.syncing != true {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
