@@ -178,6 +178,13 @@ ground-truth captures (§6).**
 in the HR-only capture). First sample is a warm-up sentinel (byte[2] ≈ 8); treat
 < ~30 as "not locked".
 
+**Poll cadence matters** 🟢 (btsnoop_hr.log): the ring emits one HR sample **~every
+2 s**, and the windowed average needs undisturbed time to climb off the warm-up `8`.
+The official app waits ~10 s after `06 01 00`, then polls `95 00 00` **request/response
+at ~2 s**. Polling faster (e.g. ~700 ms, 3×/sample) keeps **resetting** the HR window so
+byte[2] stays pinned at `8` — the cause of "stuck warming up". SpO2's byte[14] is robust
+to fast polling, so only HR exhibits this. Poll HR no faster than ~2 s.
+
 **Enter-live sequence** 🟢 (FR02.018 capture): after the connect-time history drain,
 the app sends **`d0 00 00` → `06 01 00` → `07 00 00`**, then polls `95 00 00` ~1/s. The
 `d0 00 00` is required — without it the ring stays in bulk mode and emits no `15 00` HR
