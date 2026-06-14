@@ -214,10 +214,17 @@ time (no 12 h offset in this capture; bears on §5.6/§6.6). Reassemble + decode
   secondary service `0x0900`. Per-epoch `[6]` (1–10, quality?) and `[7]` (swings 64→120
   over the night — too volatile for temp) are not it either.
   - RR is most likely **app-derived** (PPG/HRV respiratory sinus arrhythmia), not on the wire.
-  - **Skin temp is measured only at night** (per the ring owner) yet was absent from this
-    overnight sync → it is fetched by a **separate command the app issues when its
-    Temperature screen is opened** (candidate transport: secondary service `0x0900`),
-    not part of the standard activity/sleep/PPG history drain.
+  - **Skin temp is measured only at night** (per the ring owner) yet is absent from BOTH a
+    full morning sync (2026-06-13 night) AND a capture taken **while the app's Temperature
+    screen was open** — that screen showed cached data and issued **no BLE fetch** (only a
+    normal recent-activity re-sync followed). So temp never rides the activity/sleep/PPG
+    drain; it needs a **dedicated command the app sends on its own schedule** (e.g. first
+    sync of the day / background), which neither capture triggered.
+  - **Sync-open `0x02` flag byte** (byte[6]) observed as `00` and `03`; **both return the
+    same activity/sleep `0x4c`+`0x47` data** (flag=03 segments carried fewer `0x4c`, more
+    `0x10`/`0x87`). So flag is NOT a per-metric stream selector. Purpose still 🔴 — other
+    flag values (`01`/`02`/`04`…) are untried and a candidate temp/summary selector for
+    **active probing** (`replay 02 00 <cursor> 0X 01 00`).
   - **Ground truth for when we capture it:** RingConn reports temp Oura-style as a signed
     **deviation from a personal baseline** plus an absolute reading — observed `−0.16`
     deviation and `96.75 °F` (35.97 °C); the 2026-06-13 night showed `96.58 °F` (35.88 °C).
