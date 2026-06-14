@@ -83,14 +83,26 @@ struct ContentView: View {
             // HR convergence trend: optical HR is a windowed average that climbs over
             // ~20–60 s of stillness, so a single number is misleading. Show the recent
             // samples + range so a stuck vs. converging reading is obvious.
-            if !showingSpO2, let trend = session?.liveHRTrend, trend.count >= 2 {
-                let lo = trend.min() ?? 0, hi = trend.max() ?? 0
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(trend.map(String.init).joined(separator: "  "))
-                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                        .lineLimit(1).minimumScaleFactor(0.6)
-                    Text(lo == hi ? "steady at \(lo) — give it 20–60 s of stillness to settle"
-                                  : "range \(lo)–\(hi) bpm (converging)")
+            if !showingSpO2 {
+                if let trend = session?.liveHRTrend, trend.count >= 2 {
+                    let lo = trend.min() ?? 0, hi = trend.max() ?? 0
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(trend.map(String.init).joined(separator: "  "))
+                            .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                            .lineLimit(1).minimumScaleFactor(0.6)
+                        Text(lo == hi ? "steady at \(lo) — give it 20–60 s of stillness to settle"
+                                      : "range \(lo)–\(hi) bpm (converging)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                } else if session?.monitoring == true, session?.liveHR == nil,
+                          let warm = session?.liveHRWarmup {
+                    // Short HR frames ARE arriving but byte[2] is still climbing out of
+                    // warm-up — tell the user to hold still rather than showing a dead "—".
+                    Label("Warming up… (\(warm)) — hold still, keep the ring snug",
+                          systemImage: "hourglass")
+                        .font(.caption2).foregroundStyle(.orange)
+                } else if session?.monitoring == true, session?.liveHR == nil {
+                    Text("Waiting for HR frames… if this never moves, the ring isn't in HR mode.")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }

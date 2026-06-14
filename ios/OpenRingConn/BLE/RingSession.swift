@@ -23,6 +23,10 @@ final class RingSession: NSObject {
     /// reading is converging vs. stuck — these sensors report a windowed average that
     /// climbs over ~20–60 s of stillness, so a single number is misleading.
     private(set) var liveHRTrend: [Int] = []
+    /// Raw byte[2] of the most recent SHORT HR frame while still below the lock
+    /// threshold (sensor warming up / poor contact). Lets the UI prove frames are
+    /// arriving and climbing, vs. no HR frames at all.
+    private(set) var liveHRWarmup: Int?
     private(set) var steps: Int?          // ring onboard step count (0x10/0x87 [4:6], §5.4)
     private(set) var liveMode: LiveMode = .hr
     private(set) var monitoring = false
@@ -76,10 +80,13 @@ final class RingSession: NSObject {
         syncing = false
         monitoring = true
         liveHRTrend.removeAll()   // fresh convergence window
+        liveHRWarmup = nil
         let modeCmd = liveMode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
-        // Proven-accepted cursor (0xFFFFFFFF), then enter the selected live mode.
+        // Proven enter sequence (PROTOCOL.md §5.1): open session, drain a history record
+        // (the extra `fetch`), then d0 status query → mode byte → fetch. The history
+        // drain + d0 are what reliably leaves bulk mode so the live stream starts.
         let enterSeq: [[UInt8]] = [Command.status0, Command.status1, Command.syncAll,
-                                   Command.statusQuery, modeCmd, Command.fetch]
+                                   Command.fetch, Command.statusQuery, modeCmd, Command.fetch]
         monitorTask = Task { [weak self] in
             for cmd in enterSeq {
                 guard let self else { return }
@@ -122,10 +129,16 @@ final class RingSession: NSObject {
         guard liveMode != mode else { return }
         liveMode = mode
         liveHRTrend.removeAll()   // restarting the HR window
+        liveHRWarmup = nil
         guard monitoring else { return }
         let modeCmd = mode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
+        // Re-arm with the d0 status query before the mode byte (mirrors the proven enter
+        // sequence) — switching the mode byte alone doesn't reliably restart the short
+        // 15 00 HR stream when coming back from SpO2.
         Task { [weak self] in
             guard let self else { return }
+            self.write(Command.statusQuery)
+            try? await Task.sleep(for: .milliseconds(250))
             self.write(modeCmd)
             try? await Task.sleep(for: .milliseconds(250))
             self.write(Command.fetch)
@@ -179,9 +192,16 @@ final class RingSession: NSObject {
         stagedSegments = BulkSleep.stagedSegments(from: bulkRecords)
         syncing = false
         syncTask = nil
-        syncStatus = bulkRecords.isEmpty
-            ? "No data received — is the ring bonded/awake?"
-            : "Synced \(bulkRecords.count) epochs"
+        if !bulkRecords.isEmpty {
+            syncStatus = "Synced \(bulkRecords.count) epochs"
+        } else if steps != nil {
+            // Link is fine (status frames arrived) — the ring just had no un-synced
+            // sleep/vitals pages. It only holds history it hasn't handed off yet, so
+            // once the official app (or a prior sync) drains it, there's nothing left.
+            syncStatus = "No new sleep/vitals history on the ring (it only keeps un-synced data). Live status OK."
+        } else {
+            syncStatus = "No data received — is the ring bonded/awake?"
+        }
     }
 
     private func write(_ bytes: [UInt8]) {
@@ -250,10 +270,13 @@ extension RingSession: CBPeripheralDelegate {
             //   long  `15 01 … <spo2> …`  → byte[2]=0; SpO2 at byte[14] (🟡)
             // Only the short frame carries HR — don't let a long frame zero it out.
             if frame.opcode == Frame.responseID(Opcode.poll) {
-                if let hr = LiveHR.decodeLocked(bytes) {                         // short frame, warm-up filtered
+                if let hr = LiveHR.decodeLocked(bytes) {                         // short frame, locked on
                     self.liveHR = hr
+                    self.liveHRWarmup = nil
                     self.liveHRTrend.append(hr)
                     if self.liveHRTrend.count > 12 { self.liveHRTrend.removeFirst() }
+                } else if let raw = LiveHR.decode(bytes) {                       // short frame, still warming up
+                    self.liveHRWarmup = raw
                 }
                 if let spo2 = LiveHR.decodeSpO2(bytes) { self.liveSpO2 = spo2 }  // long frame, 🟡
             }
