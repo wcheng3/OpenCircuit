@@ -56,9 +56,16 @@ Validate the spec cheaply before committing to Swift.
 > sync is not.
 
 ## Phase 4 — HealthKit write
-- [ ] Map each metric per `HEALTHKIT_MAPPING.md`; request authorizations.
-- [ ] Write live + historical samples with device timestamps; dedup on re-sync.
-- [ ] Backfill on first run, incremental thereafter.
+- [x] Map each metric per `HEALTHKIT_MAPPING.md`; request authorizations
+      (`HealthKitWriter` per-type units + auth; sleep as `sleepAnalysis` category).
+- [x] Write historical samples with device timestamps; **dedup on re-sync** —
+      sync → `LocalStore.ingest` (cursor-based `selectNew`) + `ingestSleep` (gated on
+      the `.sleep` cursor) → only NEW samples/segments reach HealthKit (ContentView).
+- [x] Backfill on first run, incremental thereafter — the per-metric cursor makes the
+      first sync write everything and later syncs write only newer records.
+> Dedup *logic* is unit-tested via `SyncCursor`; the `LocalStore` SwiftData wrapper is
+> build-verified only (no app-target test target yet). Live-HR samples aren't persisted
+> (only history sync routes through the store). Functional run needs device + ring.
 **Exit:** ring metrics appear in Apple Health, no cloud involved.
 
 ## Phase 5 — Analytics (port from openwhoop)

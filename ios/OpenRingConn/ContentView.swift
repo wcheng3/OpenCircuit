@@ -1,9 +1,12 @@
 import SwiftUI
+import SwiftData
 import OpenRingKit
 
 struct ContentView: View {
+    @Environment(\.modelContext) private var modelContext
     @State private var scanner = RingScanner()
     @State private var healthAuthorized = false
+    @State private var lastWrite: String?
 
     private let health = HealthKitWriter()
 
@@ -51,19 +54,31 @@ struct ContentView: View {
                                        value: "\(inBed.start.formatted(date: .omitted, time: .shortened))–\(inBed.end.formatted(date: .omitted, time: .shortened))")
                     }
                     if let samples = scanner.session?.historySamples, !samples.isEmpty {
-                        Button("Write to Apple Health") {
-                            Task {
-                                try? await health.write(samples)
-                                if let segs = scanner.session?.sleepSegments, !segs.isEmpty {
-                                    try? await health.write(sleep: segs)
-                                }
-                            }
-                        }
-                        .disabled(!healthAuthorized)
+                        Button("Write to Apple Health") { writeToHealth(samples) }
+                            .disabled(!healthAuthorized)
                     }
+                    if let lastWrite { LabeledContent("Last write", value: lastWrite) }
                 }
             }
             .navigationTitle("OpenRingConn")
+        }
+    }
+
+    /// Persist + dedup via LocalStore (cursor-based), then write only the NEW
+    /// samples/segments to HealthKit — so re-syncs backfill without duplicating.
+    private func writeToHealth(_ samples: [QuantitySample]) {
+        let store = LocalStore(modelContext)
+        let segments = scanner.session?.sleepSegments ?? []
+        Task {
+            do {
+                let freshSamples = try store.ingest(samples)
+                try await health.write(freshSamples)
+                let freshSleep = try store.ingestSleep(segments)
+                if !freshSleep.isEmpty { try await health.write(sleep: freshSleep) }
+                lastWrite = "\(freshSamples.count) new samples, \(freshSleep.count) sleep segs"
+            } catch {
+                lastWrite = "error: \(error.localizedDescription)"
+            }
         }
     }
 

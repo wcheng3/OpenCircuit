@@ -68,6 +68,21 @@ struct LocalStore {
         return fresh
     }
 
+    /// Gate a night's sleep segments on the `.sleep` cursor so re-syncs don't
+    /// duplicate. Returns the segments to write (empty if this night is already
+    /// synced), advancing the cursor to the latest segment end.
+    func ingestSleep(_ segments: [SleepSegment]) throws -> [SleepSegment] {
+        guard let latest = segments.map(\.end).max() else { return [] }
+        var cursor = try loadCursor()
+        guard cursor.isNew(.sleep, latest) else { return [] }
+        cursor.advance(.sleep, to: latest)
+        if let last = cursor.last(.sleep) {
+            upsertCursor(kind: MetricKind.sleep.rawValue, last: last)
+        }
+        try context.save()
+        return segments
+    }
+
     private func upsertCursor(kind: String, last: Date) {
         let descriptor = FetchDescriptor<StoredCursor>(
             predicate: #Predicate { $0.kindRaw == kind })
