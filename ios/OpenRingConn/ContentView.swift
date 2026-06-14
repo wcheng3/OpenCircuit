@@ -55,33 +55,65 @@ struct ContentView: View {
 
     // MARK: Live
 
+    private var liveModeBinding: Binding<RingSession.LiveMode> {
+        Binding(get: { session?.liveMode ?? .hr },
+                set: { session?.setLiveMode($0) })
+    }
+
     private var liveCard: some View {
         card {
-            Text("LIVE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            HStack(alignment: .center, spacing: 20) {
-                Image(systemName: "heart.fill")
-                    .font(.system(size: 44))
-                    .foregroundStyle(.red)
+            HStack {
+                Text("LIVE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                if session?.monitoring == true { ProgressView().controlSize(.small) }
+            }
+            // Primary reading = whichever mode the ring is actively measuring.
+            let measuringHR = session?.liveMode != .spo2
+            HStack(alignment: .center, spacing: 18) {
+                Image(systemName: measuringHR ? "heart.fill" : "lungs.fill")
+                    .font(.system(size: 42))
+                    .foregroundStyle(measuringHR ? .red : .blue)
                     .symbolEffect(.pulse, isActive: session?.monitoring == true)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(session?.liveHR.map(String.init) ?? "—")
-                        .font(.system(size: 72, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                        .animation(.snappy, value: session?.liveHR)
-                    Text("BPM").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+                    if measuringHR {
+                        Text(session?.liveHR.map(String.init) ?? "—")
+                            .font(.system(size: 64, weight: .bold, design: .rounded))
+                            .monospacedDigit().contentTransition(.numericText())
+                            .animation(.snappy, value: session?.liveHR)
+                        Text("BPM").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+                    } else {
+                        Text(session?.liveSpO2.map(String.init) ?? "—")
+                            .font(.system(size: 64, weight: .bold, design: .rounded))
+                            .monospacedDigit().contentTransition(.numericText())
+                            .animation(.snappy, value: session?.liveSpO2)
+                        Text("%").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
             }
-            if let spo2 = session?.liveSpO2 {
-                Label("SpO₂ \(spo2)%", systemImage: "lungs.fill")
-                    .font(.subheadline).foregroundStyle(.secondary)
+            // Secondary reading (last value of the other metric).
+            HStack(spacing: 16) {
+                if let hr = session?.liveHR, !measuringHR {
+                    Label("\(hr) bpm", systemImage: "heart.fill").foregroundStyle(.red)
+                }
+                if let spo2 = session?.liveSpO2, measuringHR {
+                    Label("\(spo2)%", systemImage: "lungs.fill").foregroundStyle(.blue)
+                }
             }
+            .font(.subheadline)
+
+            Picker("Measure", selection: liveModeBinding) {
+                Text("Heart rate").tag(RingSession.LiveMode.hr)
+                Text("SpO₂").tag(RingSession.LiveMode.spo2)
+            }
+            .pickerStyle(.segmented)
+            .disabled(session?.ready != true)
+
             Button {
                 if session?.monitoring == true { session?.stopLiveMonitoring() }
                 else { session?.startLiveMonitoring() }
             } label: {
-                Label(session?.monitoring == true ? "Stop" : "Start live HR",
+                Label(session?.monitoring == true ? "Stop" : "Start live",
                       systemImage: session?.monitoring == true ? "stop.fill" : "play.fill")
                     .frame(maxWidth: .infinity)
             }

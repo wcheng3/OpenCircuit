@@ -15,8 +15,11 @@ import OpenRingKit
 @MainActor
 final class RingSession: NSObject {
 
+    enum LiveMode { case hr, spo2 }
+
     private(set) var liveHR: Int?
     private(set) var liveSpO2: Int?       // 🟡 from long 0x15 frame byte[14]
+    private(set) var liveMode: LiveMode = .hr
     private(set) var monitoring = false
     private(set) var lastFrame: String?
     private(set) var ready = false
@@ -58,10 +61,10 @@ final class RingSession: NSObject {
     func startLiveMonitoring() {
         guard monitorTask == nil else { return }
         monitoring = true
-        // Use the proven-accepted cursor (0xFFFFFFFF). The "open at now" variant may be
-        // rejected by the ring. If even this gets no 0x82, it's the bond/auth wall.
+        let modeCmd = liveMode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
+        // Proven-accepted cursor (0xFFFFFFFF), then enter the selected live mode.
         let enterSeq: [[UInt8]] = [Command.status0, Command.status1, Command.syncAll,
-                                   Command.statusQuery, Command.liveHRMode, Command.fetch]
+                                   Command.statusQuery, modeCmd, Command.fetch]
         monitorTask = Task { [weak self] in
             for cmd in enterSeq {
                 guard let self else { return }
@@ -73,6 +76,22 @@ final class RingSession: NSObject {
                 self.write(Command.poll)
                 try? await Task.sleep(for: .seconds(1))
             }
+        }
+    }
+
+    /// Switch live measurement between HR (`06 01 00`) and SpO2 (`06 02 00`). The ring
+    /// measures one at a time; the other metric keeps its last value. No-op until the
+    /// next start if not currently monitoring.
+    func setLiveMode(_ mode: LiveMode) {
+        guard liveMode != mode else { return }
+        liveMode = mode
+        guard monitoring else { return }
+        let modeCmd = mode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
+        Task { [weak self] in
+            guard let self else { return }
+            self.write(modeCmd)
+            try? await Task.sleep(for: .milliseconds(250))
+            self.write(Command.fetch)
         }
     }
 
