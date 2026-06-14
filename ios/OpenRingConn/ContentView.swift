@@ -80,6 +80,21 @@ struct ContentView: View {
                 Spacer()
             }
 
+            // HR convergence trend: optical HR is a windowed average that climbs over
+            // ~20–60 s of stillness, so a single number is misleading. Show the recent
+            // samples + range so a stuck vs. converging reading is obvious.
+            if !showingSpO2, let trend = session?.liveHRTrend, trend.count >= 2 {
+                let lo = trend.min() ?? 0, hi = trend.max() ?? 0
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(trend.map(String.init).joined(separator: "  "))
+                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        .lineLimit(1).minimumScaleFactor(0.6)
+                    Text(lo == hi ? "steady at \(lo) — give it 20–60 s of stillness to settle"
+                                  : "range \(lo)–\(hi) bpm (converging)")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+
             // Two mutually-exclusive buttons: starting one switches the ring's mode so
             // the other stops reading (ring measures one metric at a time).
             HStack(spacing: 12) {
@@ -93,11 +108,16 @@ struct ContentView: View {
                  : "Pick one to start. Only one reads at a time.")
                 .font(.caption2).foregroundStyle(.secondary)
 
-            if let steps = session?.steps {
+            // Always show the steps row once connected — hiding it when nil looked like
+            // "steps don't work." Ring's onboard count refreshes from the 0x10/0x87
+            // descriptor we re-request during monitoring.
+            if session?.ready == true {
                 Divider()
-                Label("\(steps) steps today", systemImage: "figure.walk")
+                let steps = session?.steps
+                Label(steps.map { "\($0) steps today" } ?? "Steps: waiting for ring…",
+                      systemImage: "figure.walk")
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.green)
+                    .foregroundStyle(steps == nil ? Color.secondary : Color.green)
                     .contentTransition(.numericText())
                     .animation(.snappy, value: steps)
             }

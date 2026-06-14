@@ -19,6 +19,10 @@ final class RingSession: NSObject {
 
     private(set) var liveHR: Int?
     private(set) var liveSpO2: Int?       // 🟡 from long 0x15 frame byte[14]
+    /// Recent live-HR samples (oldest→newest, capped). Lets the UI show whether the
+    /// reading is converging vs. stuck — these sensors report a windowed average that
+    /// climbs over ~20–60 s of stillness, so a single number is misleading.
+    private(set) var liveHRTrend: [Int] = []
     private(set) var steps: Int?          // ring onboard step count (0x10/0x87 [4:6], §5.4)
     private(set) var liveMode: LiveMode = .hr
     private(set) var monitoring = false
@@ -71,6 +75,7 @@ final class RingSession: NSObject {
         syncTask?.cancel(); syncTask = nil
         syncing = false
         monitoring = true
+        liveHRTrend.removeAll()   // fresh convergence window
         let modeCmd = liveMode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
         // Proven-accepted cursor (0xFFFFFFFF), then enter the selected live mode.
         let enterSeq: [[UInt8]] = [Command.status0, Command.status1, Command.syncAll,
@@ -81,9 +86,18 @@ final class RingSession: NSObject {
                 self.write(cmd)
                 try? await Task.sleep(for: .milliseconds(300))
             }
+            var tick = 0
             while !Task.isCancelled {
                 guard let self else { return }
                 self.write(Command.poll)
+                // Every ~8 s, re-pull the status descriptor (0x10/0x87) so the step
+                // count refreshes mid-session — otherwise steps only update if the ring
+                // happens to emit one spontaneously. Paced so the write isn't dropped.
+                if tick % 8 == 7 {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    self.write(Command.statusQuery)
+                }
+                tick += 1
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -107,6 +121,7 @@ final class RingSession: NSObject {
     func setLiveMode(_ mode: LiveMode) {
         guard liveMode != mode else { return }
         liveMode = mode
+        liveHRTrend.removeAll()   // restarting the HR window
         guard monitoring else { return }
         let modeCmd = mode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
         Task { [weak self] in
@@ -235,7 +250,11 @@ extension RingSession: CBPeripheralDelegate {
             //   long  `15 01 … <spo2> …`  → byte[2]=0; SpO2 at byte[14] (🟡)
             // Only the short frame carries HR — don't let a long frame zero it out.
             if frame.opcode == Frame.responseID(Opcode.poll) {
-                if let hr = LiveHR.decodeLocked(bytes) { self.liveHR = hr }      // short frame, warm-up filtered
+                if let hr = LiveHR.decodeLocked(bytes) {                         // short frame, warm-up filtered
+                    self.liveHR = hr
+                    self.liveHRTrend.append(hr)
+                    if self.liveHRTrend.count > 12 { self.liveHRTrend.removeFirst() }
+                }
                 if let spo2 = LiveHR.decodeSpO2(bytes) { self.liveSpO2 = spo2 }  // long frame, 🟡
             }
         }
