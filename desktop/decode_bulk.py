@@ -9,14 +9,28 @@ Each 0x4c notification: [0]=0x4c [1]=00 [2]=remaining-record countdown,
 then 6 x 23-byte records, then a 1-byte XOR trailer. Records concatenate
 across packets (strip the 3-byte header AND the 1-byte trailer per packet).
 
-Record (23 B), confirmed against captures/sleep_sync_btsnoop.log (FR02.018):
-  [0:4]   big-endian counter, +0x96 (150) per record  -> 150 s epochs
-  [4:8]   4-byte field (varies; secondary counter / packed) 🟡
-  [8]     subtype tag: 0x12 common; 0x5a-0x63 periodic markers 🟡
-  [9]     small int (mostly 0x0a) 🟡
-  [10:15] 5 x per-30 s MOTION/activity counts (decays awake->asleep) 🟢-ish
-  [15:22] 7-byte per-epoch physiology payload (HR/HRV/SpO2?) 🟡
-  [22]    trailer flags 🟡
+Record (23 B), confirmed against captures/sleep_sync_btsnoop.log (FR02.018),
+aligned to the RingConn app's readout for the 2026-06-13 night. Two layouts,
+keyed on [8]:
+
+  Sleep-vitals epoch ([8] in 0x57..0x63):
+    [0:4]   BE counter, +0x96 (150 s) per record
+    [4]     heart rate (bpm)            CONFIRMED
+    [5]     HRV / RMSSD (ms)            CONFIRMED
+    [6]     ~1-10, signal quality?      unresolved
+    [7]     ~120, pulse amplitude?      unresolved
+    [8]     SpO2 (%)                    CONFIRMED
+    [9]     ~0x0a                       flag
+    [10:15] 5x per-30s motion counts (01 baseline = still)
+    [15:22] ~zero during sleep
+    [22]    trailer flags
+
+  Activity/awake epoch ([8]=0x12/0x13):
+    [10:15] 5x motion counts (elevated when moving)
+    [15:22] 7-byte activity/physiology payload (unresolved)
+
+Respiratory rate + skin temp are NOT per-epoch here (derived/summary).
+Sleep stages are app-computed from these signals, not stored on the wire.
 
 Usage:
   python -m openringconn decode-log captures/foo.log --addr <mac> > /tmp/dec.txt
@@ -58,6 +72,10 @@ def is_idle(r):
     return r[10:15] == bytes([1, 1, 1, 1, 1]) and r[15:22] == bytes(7)
 
 
+def is_sleep_vitals(r):
+    return 0x57 <= r[8] <= 0x63
+
+
 def main(path):
     lines = open(path).read().splitlines()
     recs = reassemble_4c(notif_payloads(lines, 0x4c))
@@ -89,10 +107,14 @@ def main(path):
             c = int.from_bytes(r[0:4], "big")
             mot = r[10:15]
             msum = sum(v for v in mot if v != 1)
-            tag = "IDLE" if is_idle(r) else f"{r[8]:#04x}"
-            bar = "#" * min(msum, 40)
-            print(f"  {ts(c):%H:%M}  mot={mot.hex()} phys={r[15:22].hex()} "
-                  f"{tag:>4} {bar}")
+            if is_idle(r):
+                line = "IDLE"
+            elif is_sleep_vitals(r):
+                line = f"HR={r[4]:3d}bpm  HRV={r[5]:3d}ms  SpO2={r[8]:2d}%"
+            else:
+                bar = "#" * min(msum, 40)
+                line = f"activity mot={mot.hex()} {bar}"
+            print(f"  {ts(c):%H:%M}  {line}")
         print()
     return 0
 

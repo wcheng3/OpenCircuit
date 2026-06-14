@@ -178,17 +178,36 @@ pull time (09:38) to <6 min — counter→wall-clock is right and lands on **dev
 time (no 12 h offset in this capture; bears on §5.6/§6.6). Reassemble + decode with
 `desktop/decode_bulk.py`.
 
-- **`[10:15]` = 5× per-30 s motion/activity counts** 🟢(role)/🟡(unit). Over a real
-  night they decay from `~14 15 15 14` (≈20, awake/settling at 23:09) to the `01 01 01
-  01 01` baseline (still/asleep by 23:37), and spike again at arousals/turns — i.e. the
-  per-epoch **stillness signal** Phase 5 `SleepDetection` needs (likely the IMU stream,
-  no separate `0x47` accel needed for staging). Baseline `01` = "still", not "unworn".
-- **`[15:22]` = 7-B per-epoch physiology** (HR / HRV / SpO2?) 🔴-values/🟡-role. Dense
-  every epoch during main sleep (23:37–01:34), then **sparse** (mostly the zero/idle
-  template with a non-zero spot-check every ~15 min) for the rest of the night — a
-  low-power sampling regime, not deep sleep. Zero ≠ asleep; zero = no measurement.
-- **`[8]` subtype**: `0x12` is the common epoch (idle alternates `12`/`13`); a
-  `0x5a–0x63` family recurs roughly every ~10–15 min as marker/summary epochs 🟡.
+**Two record layouts**, distinguished by `[8]`:
+- **Activity/awake epoch** `[8]=0x12`/`0x13`: physiology/activity in `[15:22]`, motion
+  in `[10:15]` elevated.
+- **Sleep-vitals epoch** `[8]=0x57–0x63` (87–99): per-epoch vitals in `[4:9]`, motion
+  `[10:15]` at `01` baseline, `[15:22]` ≈ zero.
+
+**Sleep-vitals fields — confirmed against the RingConn app's readout for the
+2026-06-13 night** (avg HR 68 / HRV 65 ms / SpO2 98 %, low 93 % ~02:30–03:00):
+- **`[4]` = heart rate (bpm)** 🟢. Sleep-window mean ~60, dips to 56–57 in deep-sleep
+  hours, rises to 66 at wake; evening (active) epochs read 83 — physiologically correct.
+  (Sleep mean < app's all-night avg 68 because the app average includes daytime.)
+- **`[5]` = HRV / RMSSD (ms)** 🟢. Mean 69, median 70 vs app 65; high beat-to-beat
+  spread (36–114) as expected for RMSSD.
+- **`[8]` = SpO2 (%)** 🟢. Mean 96, and the low cluster (89–93) lands at **02:32–03:07**,
+  matching the app's "lowest 93 % around 2:30–3 am" — the decisive temporal anchor.
+- `[6]` (1–10, ~9) and `[7]` (~120) unresolved 🟡 — candidate signal-quality / pulse
+  amplitude. `[9]`≈`0x0a` and `[22]` (low-nibble `4`, high-nibble varies) flags 🟡.
+- **Respiratory rate (15 bpm) and skin temp (35.88 °C) are NOT in the per-epoch record**
+  — no byte matches; they are derived/summary values (separate frame or app-computed) 🔴.
+
+**`[10:15]` = 5× per-30 s motion/activity counts** 🟢(role)/🟡(unit). Over a real night
+they decay from `~14 15 15 14` (≈20, awake/settling at 23:09) to the `01 01 01 01 01`
+baseline (still/asleep) and spike at arousals/turns — the per-epoch **stillness signal**
+Phase 5 `SleepDetection` needs (likely the IMU stream; no separate `0x47` accel needed).
+Baseline `01` = "still", not "unworn".
+
+> **Sleep stages (Awake/Light/Deep/REM) are not stored per-epoch** — no stage label byte
+> found. The ring streams raw HR/HRV/SpO2/motion and the **app computes** the hypnogram,
+> matching openwhoop's approach and our Phase 5 plan: compute stages in Swift from these
+> signals, don't expect them on the wire.
 
 > **Blocker to 🟢 on values:** assigning the 7 physiology bytes to HR/HRV/SpO2 needs the
 > RingConn app's timestamped per-epoch readout for the **same night** (§6.2 / issue #7).
@@ -235,11 +254,11 @@ block is a candidate nonce source 🔴.
 Each names the single capture that converts a 🟡/🔴 field into a decoded metric.
 1. **`0x47` → real PPG:** app's realtime/exported PPG trace recorded over the *same*
    window as a btsnoop sync → confirms bit-width, channel, counter time-unit.
-2. **`0x4c` → sleep/HR/HRV/SpO2 epochs:** ⏳ *capture obtained* — a real overnight sync
-   is in `captures/sleep_sync_btsnoop.log` (2026-06-13 night). Framing, 150 s epoch
-   cadence and the `[10:15]` motion channel are decoded (§5.3); **still needs** the app's
-   timestamped per-epoch HR/HRV/SpO2 + sleep-stage boundaries for that night to pin the
-   `[15:22]` payload bytes to units. (Issue #7.)
+2. ✅ **`0x4c` → sleep/HR/HRV/SpO2 epochs — DECODED.** `captures/sleep_sync_btsnoop.log`
+   (2026-06-13 night) aligned to the app's readout: sleep-vitals epoch `[4]`=HR,
+   `[5]`=HRV(ms), `[8]`=SpO2(%) confirmed (§5.3); `[10:15]`=motion. Remaining 🟡/🔴:
+   `[6]`/`[7]` semantics, and respiratory rate + skin temp (not in this record — likely
+   a separate summary frame). Stages are app-computed, not on the wire. (Issue #7/#9.)
 3. ✅ **Counter→wall-clock — PINNED.** Counter is seconds (§5.6 epoch); the bulk-record
    step `+0x96` = **150 s**, so each `0x4c` record is a 2.5-min epoch and `0x47` records
    span `0x0384`=900 s. Cross-checked: last session ends 6 min before the sync. (Issue #3.)
