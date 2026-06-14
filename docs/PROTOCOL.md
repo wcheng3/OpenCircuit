@@ -206,14 +206,25 @@ time (no 12 h offset in this capture; bears on §5.6/§6.6). Reassemble + decode
   matching the app's "lowest 93 % around 2:30–3 am" — the decisive temporal anchor.
 - `[6]` (1–10, ~9) and `[7]` (~120) unresolved 🟡 — candidate signal-quality / pulse
   amplitude. `[9]`≈`0x0a` and `[22]` (low-nibble `4`, high-nibble varies) flags 🟡.
-- **Respiratory rate (15 bpm) and skin temp (35.88 °C) are NOT in ANY frame this
-  sync captured** 🔴 — checked every byte and 16-bit field of the `0x4c`/`0x47`/`0x10`/
-  `0x87`/`0x81`/`0x15` frames: no stable `0x0f` (RR) and no temp-scaled value (`358`/`359`
-  = 0.1 °C, `3588` = 0.01 °C, `966`/`9658` = °F all absent). RR is most likely **app-derived**
-  (from PPG/HRV — respiratory sinus arrhythmia); skin temp is a real sensor reading, so it
-  is probably fetched by a **command this capture never issued** (candidate: the 🔴
-  secondary service `0x0900`, §1) or lives in a daily-summary record we haven't pulled.
-  A capture that opens the app's temperature screen / triggers a temp refresh is needed.
+- **Respiratory rate (15 bpm) and skin temp are NOT in ANY frame this sync captured** 🔴.
+  Verified exhaustively: every byte and 16-bit field of the `0x4c`/`0x47`/`0x10`/`0x87`/
+  `0x81`/`0x15` frames (no stable `0x0f` RR; no temp value at `358`/`359`=0.1 °C,
+  `3588`=0.01 °C, `360`/`3597`, `966`/`9658`=°F, nor a small signed deviation), **and**
+  every BLE handle — all traffic was on `0x0804`/`0x0802`/`0x0805`, nothing on the
+  secondary service `0x0900`. Per-epoch `[6]` (1–10, quality?) and `[7]` (swings 64→120
+  over the night — too volatile for temp) are not it either.
+  - RR is most likely **app-derived** (PPG/HRV respiratory sinus arrhythmia), not on the wire.
+  - **Skin temp is measured only at night** (per the ring owner) yet was absent from this
+    overnight sync → it is fetched by a **separate command the app issues when its
+    Temperature screen is opened** (candidate transport: secondary service `0x0900`),
+    not part of the standard activity/sleep/PPG history drain.
+  - **Ground truth for when we capture it:** RingConn reports temp Oura-style as a signed
+    **deviation from a personal baseline** plus an absolute reading — observed `−0.16`
+    deviation and `96.75 °F` (35.97 °C); the 2026-06-13 night showed `96.58 °F` (35.88 °C).
+    Baseline ≈ 36.1 °C. Expect a small signed value (≈ `−16` if 0.01 °C, or `−0.16` scaled)
+    alongside an absolute near `3588`–`3597` (0.01 °C) or `9658`–`9675` (0.01 °F).
+  - **Capture needed:** snoop on → open the app's **Temperature / Trends screen** (which
+    should trigger the fetch) → sync / `adb bugreport`.
 
 **`[10:15]` = 5× per-30 s motion/activity counts** 🟢(role)/🟡(unit). Over a real night
 they decay from `~14 15 15 14` (≈20, awake/settling at 23:09) to the `01 01 01 01 01`
@@ -226,10 +237,9 @@ Baseline `01` = "still", not "unworn".
 > matching openwhoop's approach and our Phase 5 plan: compute stages in Swift from these
 > signals, don't expect them on the wire.
 
-> **Blocker to 🟢 on values:** assigning the 7 physiology bytes to HR/HRV/SpO2 needs the
-> RingConn app's timestamped per-epoch readout for the **same night** (§6.2 / issue #7).
-> Structure, framing, epoch cadence and the motion channel are decoded; the payload
-> bytes are not yet pinned to units.
+> **Status:** HR `[4]`, HRV `[5]`, SpO2 `[8]`, motion `[10:15]` and the 150 s cadence are
+> 🟢 (app-aligned, §6.2). Open: `[6]`/`[7]` semantics, the activity-epoch `[15:22]` payload,
+> and skin temp + RR (not in this capture — see above).
 
 ### 5.4 `0x10` / `0x87` — fixed 19-byte descriptor
 `0x10` ← `d0 00 00` (also spontaneous ~30–60 s); `0x87` ← `07 00 00`. **Identical
@@ -287,6 +297,11 @@ Each names the single capture that converts a 🟡/🔴 field into a decoded met
    phone set to UTC → resolves the 12 h offset.
 7. **Session nonce source:** correlate `01 01 <nonce>` against prior `0x81`/`0x10`
    fields. *(Not required — nonce is arbitrary; §4.)*
+8. **Skin temp + its transport:** temp is measured only at night yet is absent from a full
+   activity/sleep/PPG sync and from `0x0900` — fetched by a distinct command/screen. Snoop
+   on → open the app's **Temperature/Trends screen** → sync. Ground truth so far: `−0.16`
+   deviation / `96.75 °F`; expect an absolute near `3588`–`3597` (0.01 °C). Unblocks the
+   `bodyTemperature`/`appleSleepingWristTemperature` HealthKit write.
 
 ---
 
