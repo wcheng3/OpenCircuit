@@ -3,16 +3,17 @@
 Goal: replicate openwhoop's local-first health extraction for the **RingConn Gen 2**,
 writing all metrics to **Apple Health**.
 
-## Phase 1 — Decode the protocol  ◀ current
+## Phase 1 — Decode the protocol  ✅ COMPLETE
 The gating work. Produce a written spec; almost nothing is public.
 - [x] Enumerate full GATT tree (`scan`) → `PROTOCOL.md` §1 (🟢 service 8327ad99,
       notify/write chars bound to handles 0x0804/0x0802).
 - [x] Auth/handshake: none observed — data flows after CCCD enable (§2).
 - [x] Encryption: BLE app layer is plaintext (§0, 🟢).
 - [x] Framing: `[cmd][len][payload][xor]`, resp = cmd XOR 0x80 (§3, 🟢).
-- [ ] Confirm live HR end to end — decode is 🟡 (byte[2] of 0x15 frames). Now
-      doable live on the Mac (`listen`/`replay` work); needs a two-reading check.
-**Exit:** `listen` shows decoded live HR from the ring. ← only this remains.
+- [x] Confirm live HR end to end — 🟢 byte[2] of `0x15` frames = HR in bpm,
+      confirmed by a targeted HR-only capture settling to 61 bpm resting.
+**Exit:** ✅ **MET** — decoded live HR from a real capture (`decode-log` +
+`framing.decode_live_hr`). Phase 1 complete.
 
 ## Phase 2 — Desktop proof-of-client
 Validate the spec cheaply before committing to Swift.

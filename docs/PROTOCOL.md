@@ -122,25 +122,28 @@ a few seconds of PPG warm-up; and the ring sleeps/stops advertising seconds afte
 disconnect (wake via charger contact or motion). Metric-specific sync commands
 (sleep/HRV/SpO2/steps/temp) not yet isolated.
 
-> **Open blocker for live-HR-on-demand (🟡).** `02` (session-open) only replies
-> `82` when the ring has **pending data to sync**. `02 00 FFFFFFFF…` returned `82`
-> + history while a backlog existed, but once the backlog is drained it goes silent,
-> so the session never opens and `06`/live never engages. In the reference capture,
-> live HR was entered *while the history session was still open*. To crack
-> live-HR-only cleanly we need a **fresh Android capture of ONLY a manual HR
-> measurement** (no history sync) — that isolates the minimal live-HR entry without
-> the history-session entanglement. Until then, live HR is confirmed by the capture
-> (byte[2] of `0x15`) but not yet reproduced on demand from the Mac.
+> **Session-open nuances (🟡), from the HR-only capture.** Two args are
+> **per-session, not fixed** — replaying captured values fails:
+> - `01 01 <3 bytes>` carries a per-session **nonce** (`31 82 67`, then `f0 1e 88`,
+>   `9c 61 91` across sessions). Our replays reused a stale nonce, so the session
+>   never opened — this, not just the cursor, is why Mac live-HR replay stalled.
+> - `02 00 <cursor:4> …` cursor advances each sync (`0c 22 98 c3` → `0c 22 bb f7`).
+>   `FFFFFFFF` works only while a backlog exists.
+> The HR DECODE is confirmed (above); reproducing the live stream on demand from the
+> Mac needs the nonce + cursor derived correctly (source of the nonce still 🔴 —
+> likely from an `81` response field). Not required for Phase 1.
 
 ## 5. Decoded metric formats
 
-### Heart rate (live) 🟡
-`0x95` poll → `0x15` frames. During the reading the candidate HR byte climbs
-`0x52 0x54 0x58 0x5a 0x5b` (82→91) — consistent with a settling pulse measurement.
-Example: `15 00 5b 0a b0 f4` (byte[2] = HR, `f4` = XOR trailer). **Confirm with a
-two-reading diff** (capture two HR measurements ~10 bpm apart, diff the `0x15`
-frames to lock the offset). Longer `15 01 …` frames carry additional fields
-(SpO2/perfusion?), ending `… 00 60 …` (0x60 = 96).
+### Heart rate (live) 🟢 CONFIRMED
+`0x95` poll → `0x15` frame: **`15 00 <hr> 0a b0 <xor>`** — **byte[2] = HR in bpm**.
+Confirmed by a targeted HR-only capture (`captures/btsnoop_hr.log`, 00:23): the
+sensor warms up then settles to a stable resting pulse —
+`08`(warm-up) → `66 65 64 63 62 61 61 61 61` — i.e. 61 bpm resting, a textbook
+settle. Bytes [3]=`0a`, [4]=`b0` are constant (status/signal-quality flags, 🟡).
+First sample after entering live mode is a warm-up sentinel (`byte[2]` ≈ 8) — treat
+values below ~30 as "not locked yet". Longer `15 01 …` frames carry extra fields
+(SpO2/perfusion? 🔴).
 
 ### Bulk PPG / waveform (history) 🟡
 `0x47`/`0x4c` frames, `0c 09 <ctr>`-delimited records. `0x47` records hold a

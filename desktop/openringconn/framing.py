@@ -97,15 +97,12 @@ def response_id(cmd: int) -> int:
 
 
 def decode_live_hr(payload: bytes) -> int | None:
-    """Best-known decode of a live-HR sample (0x15 frame, handle 0x0804).
+    """Decode a live-HR sample (0x15 frame, handle 0x0804). 🟢 confirmed FR02.018.
 
-    Observation (🟡 FR02.018): in `0x95`-poll responses `15 00 <hr> 0a b0 <xor>`
-    byte[2] tracks a settling pulse (82->91 bpm across one reading). Offset still
-    needs a two-reading diff to lock down. Falls back to the legacy low-7-bits
-    guess for short/legacy payloads.
+    Frame is `15 00 <hr> 0a b0 <xor>`; byte[2] = HR in bpm. Confirmed by an HR-only
+    capture that settled to a stable 61 bpm resting pulse. The first sample after
+    entering live mode is a warm-up sentinel (byte[2] ~= 8) before the PPG locks.
     """
-    if not payload:
-        return None
     if len(payload) >= 4 and payload[0] == 0x15:
         return payload[2]
-    return payload[-1] & 0x7F
+    return None

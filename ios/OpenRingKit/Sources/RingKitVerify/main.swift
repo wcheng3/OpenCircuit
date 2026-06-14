@@ -49,7 +49,9 @@ for (cmd, resp) in pairs {
 
 let p = Frame.parse(hex("8100b031"))
 check(p == Frame.Parsed(opcode: 0x81, body: [0x00, 0xB0], trailer: 0x31), "parse splits opcode/body/trailer")
-check(LiveHR.decode(hex("15005b0ab0f4")) == 91, "live HR 0x15 frame -> 91 bpm (🟡 tentative offset)")
+check(LiveHR.decode(hex("15005b0ab0f4")) == 91, "live HR 0x15 byte[2] -> 91 bpm (🟢 confirmed)")
+check(LiveHR.decode(hex("15003d0ab092")) == 61, "live HR resting -> 61 bpm (from HR-only capture)")
+check(LiveHR.decodeLocked(hex("1500080ab0a7")) == nil, "warm-up sentinel (8) filtered by decodeLocked")
 check(LiveHR.decode([]) == nil, "empty HR -> nil")
 
 // --- Metric models + SyncCursor ---
