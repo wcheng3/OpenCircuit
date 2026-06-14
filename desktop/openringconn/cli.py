@@ -40,7 +40,11 @@ def main(argv: list[str] | None = None) -> int:
     sl.add_argument("--addr", required=True)
     sl.add_argument("--char", default=ble.NOTIFY_CHAR)
     sl.add_argument("--keepalive", action="store_true",
-                    help="periodically write the live-HR keepalive")
+                    help="periodically poll (95 00 00) for live samples")
+    sl.add_argument("--start-hr", action="store_true",
+                    help="send the live-HR start sequence (06 01 00, 07 00 00) on connect")
+    sl.add_argument("--send", action="append", metavar="HEX", default=None,
+                    help="write a raw command frame on connect (verbatim, repeatable)")
     sl.add_argument("--duration", type=float, default=None)
 
     sr = sub.add_parser("replay", help="write a command and log the response")
@@ -69,7 +73,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "enumerate":
             asyncio.run(session.enumerate_gatt(args.addr))
         elif args.cmd == "listen":
-            asyncio.run(session.listen(args.addr, args.char, args.keepalive, args.duration))
+            asyncio.run(session.listen(args.addr, args.char, args.keepalive,
+                                       args.duration, args.start_hr, args.send))
         elif args.cmd == "replay":
             asyncio.run(session.replay(args.addr, _parse_hex(args.hex), args.char,
                                        args.response, args.wait))

@@ -17,6 +17,24 @@ def _looks_like_ring(name: str | None) -> bool:
     return any(name.startswith(p) for p in ble.NAME_PREFIXES)
 
 
+async def _resolve(target, timeout: float = 10.0):
+    """Return a connectable target for BleakClient.
+
+    On macOS, CoreBluetooth can't connect to a bare address *string* — it needs
+    the discovered BLEDevice object. So if we're handed a string, do a quick scan
+    to find the live device; if we already have a BLEDevice, use it as-is.
+    """
+    if not isinstance(target, str):
+        return target
+    device = await BleakScanner.find_device_by_address(target, timeout=timeout)
+    if device is None:
+        raise RuntimeError(
+            f"Could not find {target} while scanning. Make sure the ring is awake "
+            f"and not connected to the phone (turn off the phone's Bluetooth)."
+        )
+    return device
+
+
 async def scan(timeout: float = 10.0) -> None:
     """List nearby devices, then enumerate the ring's GATT tree."""
     print(f"Scanning {timeout:.0f}s …")
@@ -32,13 +50,19 @@ async def scan(timeout: float = 10.0) -> None:
     if ring is None:
         print("\nNo RingConn candidate found. Pass --addr to inspect a known MAC.")
         return
-    await enumerate_gatt(ring.address)
+    # Pass the discovered BLEDevice object (not its address) — required on macOS.
+    await enumerate_gatt(ring)
 
 
-async def enumerate_gatt(address: str) -> None:
-    """Print every service/characteristic/descriptor with handles and properties."""
+async def enumerate_gatt(target) -> None:
+    """Print every service/characteristic/descriptor with handles and properties.
+
+    `target` may be a BLEDevice (from scan) or an address string (from --addr).
+    """
+    device = await _resolve(target)
+    address = device.address if not isinstance(device, str) else device
     print(f"\nConnecting to {address} …")
-    async with BleakClient(address) as client:
+    async with BleakClient(device) as client:
         print(f"Connected. Services for {address}:\n")
         for service in client.services:
             print(f"[service] {service.uuid}  (handle 0x{service.handle:04x})")
@@ -62,24 +86,41 @@ def _make_handler(label: str):
 
 
 async def listen(address: str, notify_char: str = ble.NOTIFY_CHAR,
-                 keepalive: bool = False, duration: float | None = None) -> None:
+                 keepalive: bool = False, duration: float | None = None,
+                 start_hr: bool = False, sends: list[str] | None = None) -> None:
     """Subscribe to the notify characteristic and log every payload as hex.
 
-    With --keepalive, periodically writes the observed live-HR keepalive so the
-    ring keeps streaming (useful while decoding heart rate).
+    --send HEX (repeatable) writes arbitrary command frames verbatim after
+    subscribing (commands are NOT checksummed — bytes are sent as-is).
+    --start-hr is a shortcut for the live-HR start sequence (06 01 00, 07 00 00).
+    --keepalive then polls (95 00 00) every second so the ring keeps emitting
+    0x15 live samples (byte[2] = HR).
     """
+    # Build the on-connect write sequence.
+    frames: list[bytes] = [bytes.fromhex(h.replace(" ", "")) for h in (sends or [])]
+    if start_hr:
+        frames += ble.LIVE_HR_START_SEQ
+
+    device = await _resolve(address)
     print(f"Connecting to {address} …")
-    async with BleakClient(address) as client:
+    async with BleakClient(device) as client:
         print(f"Connected. Subscribing to {notify_char}. Ctrl-C to stop.\n")
         await client.start_notify(notify_char, _make_handler("notify"))
+
+        for cmd in frames:
+            print(f"  -> send {cmd.hex(' ')}")
+            with contextlib.suppress(Exception):
+                await client.write_gatt_char(ble.WRITE_CHAR, cmd, response=True)
+            await asyncio.sleep(0.4)
 
         async def keepalive_loop():
             while True:
                 with contextlib.suppress(Exception):
+                    # Write char advertises `write` (not write-no-response) -> response=True.
                     await client.write_gatt_char(
-                        ble.WRITE_CHAR, ble.KEEPALIVE_PAYLOAD, response=False
+                        ble.WRITE_CHAR, ble.KEEPALIVE_PAYLOAD, response=True
                     )
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
 
         tasks = []
         if keepalive:
@@ -98,8 +139,9 @@ async def listen(address: str, notify_char: str = ble.NOTIFY_CHAR,
 async def replay(address: str, payload: bytes, write_char: str = ble.WRITE_CHAR,
                  response: bool = False, listen_after: float = 5.0) -> None:
     """Write one command and log notifications that follow it."""
+    device = await _resolve(address)
     print(f"Connecting to {address} …")
-    async with BleakClient(address) as client:
+    async with BleakClient(device) as client:
         await client.start_notify(ble.NOTIFY_CHAR, _make_handler("notify"))
         print(f"Writing {payload.hex(' ')} -> {write_char} (response={response})")
         await client.write_gatt_char(write_char, payload, response=response)
