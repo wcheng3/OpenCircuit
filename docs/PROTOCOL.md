@@ -165,7 +165,14 @@ ground-truth captures (§6).**
 ### 5.1 Heart rate (live) 🟢 CONFIRMED
 `0x95` poll → `0x15`: **`15 00 <hr> 0a b0 <xor>`**, byte[2] = HR bpm (61 bpm resting
 in the HR-only capture). First sample is a warm-up sentinel (byte[2] ≈ 8); treat
-< ~30 as "not locked". Longer `15 01 …` frames carry extra fields (SpO2? 🔴).
+< ~30 as "not locked".
+
+**Enter-live sequence** 🟢 (FR02.018 capture): after the connect-time history drain,
+the app sends **`d0 00 00` → `06 01 00` → `07 00 00`**, then polls `95 00 00` ~1/s. The
+`d0 00 00` is required — without it the ring stays in bulk mode and emits no `15 00` HR
+frames. **`06 01 00` = HR mode** (short `15 00 <hr>` frames); **`06 02 00` = SpO2 mode**
+→ long **`15 01 … <spo2> …`** frames where **byte[14] = SpO2 %** 🟡 (matches `0x60`/`0x61`
+= 96/97 in the live capture; byte[2] is `00`, so don't read HR from these).
 
 ### 5.2 `0x47` — bulk PPG / waveform page (ACK each with `c7 00 00`)
 Page: `[0]`=`0x47` · `[1]`=`00` · **`[2]`=remaining-RECORD countdown** (−5/full page,
