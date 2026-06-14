@@ -285,10 +285,18 @@ Baseline `01` = "still", not "unworn".
 `0x10` ← `d0 00 00` (also spontaneous ~30–60 s); `0x87` ← `07 00 00`. **Identical
 layout** (only `[0]` respid differs; `0x87` body == `0x10` body) → shared descriptor,
 XOR-valid. `[1]`=per-session marker (`4e`→`5c`; same value in `0x81 01`) 🟡 · `[2]`=
-state enum `01–04` (not a counter) 🟡 · `[6:8]`/`[8:10]`=16-bit A/B with validity
-flag byte (`00`+`fd` cold, `01`+value once data exists) 🟡 · `[15]`=declines over an
-evening but **not plain battery** 🟡 · `[17]`=`ff` idle; **non-`ff` precedes a bulk
-stream → "data follows"** 🟡.
+state enum `01–04` (not a counter) 🟡 · **`[4:6]`=STEP COUNT (16-bit BE)** 🟢 · `[6:8]`/
+`[8:10]`=16-bit A/B with validity flag (grow with activity → active-secs/calories? 🟡) ·
+`[15]`=declines over an evening but **not plain battery** 🟡 · `[17]`=`ff` idle;
+**non-`ff` precedes a bulk stream → "data follows"** 🟡.
+
+**`[4:6]` = the ring's onboard step count** 🟢 (live test 2026-06-14). After clearing
+the official app and forcing a from-scratch ring re-sync, the app showed **81 steps** and
+`[4:6]` in the descriptor frames read **exactly 81** (`00 51`); it is `0` overnight (no
+steps) and climbs through the day (6→24→35→79→80→81). NOTE this is the **ring's own
+count**, which differs from the app's normal display (cloud-aggregated daily total, e.g.
+917 earlier same day) — search for the *ring's* value, not the app's. Decoded by
+`OpenRingKit.DeviceStatus.steps`.
 
 ### 5.5 `0x50` — end-of-history cursor report (NO XOR trailer) 🟡
 Spontaneous after the last bulk page. Distinct class: **no XOR trailer** (last byte

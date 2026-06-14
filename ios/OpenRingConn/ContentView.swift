@@ -92,6 +92,15 @@ struct ContentView: View {
                  ? "Measuring \(showingSpO2 ? "SpO₂" : "heart rate") — the other is off."
                  : "Pick one to start. Only one reads at a time.")
                 .font(.caption2).foregroundStyle(.secondary)
+
+            if let steps = session?.steps {
+                Divider()
+                Label("\(steps) steps today", systemImage: "figure.walk")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.green)
+                    .contentTransition(.numericText())
+                    .animation(.snappy, value: steps)
+            }
         }
     }
 
@@ -267,13 +276,21 @@ struct ContentView: View {
     private func writeToHealth(_ samples: [QuantitySample]) {
         let store = LocalStore(modelContext)
         let segments = session?.sleepSegments ?? []
+        let steps = session?.steps
         Task {
             do {
                 let freshSamples = try store.ingest(samples)
                 try await health.write(freshSamples)
                 let freshSleep = try store.ingestSleep(segments)
                 if !freshSleep.isEmpty { try await health.write(sleep: freshSleep) }
-                lastWrite = "Wrote \(freshSamples.count) samples, \(freshSleep.count) sleep segments"
+                // Steps: write today's cumulative count over [startOfDay, now].
+                if let steps, steps > 0 {
+                    let startOfDay = Calendar.current.startOfDay(for: Date())
+                    try await health.write([QuantitySample(kind: .steps, start: startOfDay,
+                                                           end: Date(), value: Double(steps))])
+                }
+                lastWrite = "Wrote \(freshSamples.count) samples, \(freshSleep.count) sleep segs"
+                    + (steps.map { ", \($0) steps" } ?? "")
             } catch {
                 lastWrite = "Error: \(error.localizedDescription)"
             }

@@ -74,6 +74,15 @@ check(decodedSpO2 == [96, 96, 97], "real SpO2 frames -> byte[14] %")
 print("    => live SpO2 from real frames: \(decodedSpO2.compactMap { $0 })")
 check(LiveHR.decodeSpO2(hex("15005b0ab0f4")) == nil, "short HR frame yields no SpO2")
 
+// --- Step count from the 0x10/0x87 descriptor [4:6] (real frames, §5.4) ---
+check(DeviceStatus.steps(hex("105402000051011f012500000000105400ff96")) == 81,
+      "descriptor [4:6] -> 81 steps (🟢 app-confirmed via from-scratch sync)")
+check(DeviceStatus.steps(hex("8754020000000157015700000000105800ff66")) == 0,
+      "descriptor with no steps -> 0")
+check(DeviceStatus.steps(hex("8754030000510138013a00000000105402ff3a")) == 81,
+      "step count also in 0x87 descriptor")
+check(DeviceStatus.steps(hex("15005b0ab0f4")) == nil, "non-descriptor frame -> nil steps")
+
 // --- Metric models + SyncCursor ---
 check(MetricKind.spo2.unit == "fraction", "spo2 unit is fraction (HealthKit 0…1)")
 check(MetricKind.heartRate.unit == "count/min", "heartRate unit count/min")

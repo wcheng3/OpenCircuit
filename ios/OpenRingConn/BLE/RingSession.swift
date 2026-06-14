@@ -19,6 +19,7 @@ final class RingSession: NSObject {
 
     private(set) var liveHR: Int?
     private(set) var liveSpO2: Int?       // 🟡 from long 0x15 frame byte[14]
+    private(set) var steps: Int?          // ring onboard step count (0x10/0x87 [4:6], §5.4)
     private(set) var liveMode: LiveMode = .hr
     private(set) var monitoring = false
     private(set) var lastFrame: String?
@@ -201,6 +202,11 @@ extension RingSession: CBPeripheralDelegate {
         let bytes = [UInt8](data)
         Task { @MainActor in
             self.lastFrame = data.map { String(format: "%02x", $0) }.joined(separator: " ")
+            // Ring step count rides the 0x10/0x87 descriptor [4:6] (§5.4). Frames with 0
+            // are interleaved, so take the running max (today's cumulative count).
+            if let s = DeviceStatus.steps(bytes), s > 0 {
+                self.steps = max(self.steps ?? 0, s)
+            }
             // Bulk history pages: accumulate + ack to continue draining (47→c7, 4c→cc).
             switch bytes.first {
             case 0x47:
