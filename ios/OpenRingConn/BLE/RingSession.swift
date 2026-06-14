@@ -58,8 +58,9 @@ final class RingSession: NSObject {
     func startLiveMonitoring() {
         guard monitorTask == nil else { return }
         monitoring = true
-        let openNow = Command.syncSince(unixSeconds: Int(Date().timeIntervalSince1970))
-        let enterSeq: [[UInt8]] = [Command.status0, Command.status1, openNow,
+        // Use the proven-accepted cursor (0xFFFFFFFF). The "open at now" variant may be
+        // rejected by the ring. If even this gets no 0x82, it's the bond/auth wall.
+        let enterSeq: [[UInt8]] = [Command.status0, Command.status1, Command.syncAll,
                                    Command.statusQuery, Command.liveHRMode, Command.fetch]
         monitorTask = Task { [weak self] in
             for cmd in enterSeq {
