@@ -166,10 +166,34 @@ oscillatory (pulsatile-like) when worn — not globally monotonic.
 Page: `[0]`=`0x4c` · `[1]`=`00` · **`[2]`=remaining-RECORD countdown** (−6/page) ·
 body = 6×**23-byte records** · `[last]`=XOR. 🟢
 Record (23 B): `[0]`=`0x0c` · `[1:4]`=BE counter **+0x96/rec** (cursor space) 🟢 ·
-`[8]`=subtype tag (idle alternates `12/13`) 🟢 · `[10:15]`=baseline `01 01 01 01 01` ·
-`[15:22]`=7-B payload (zero idle, dense when worn) 🟡 · `[22]`=trailer flags (idle
-`12→00`/`13→04`) 🟢. Idle/unworn template: `[4:7]=05 00 0c 00`, `[9]=0a`, `[10:14]=01×5`,
-`[15:21]=00×7` 🟢. Likely the per-epoch sleep/activity stream (role = inference).
+`[8]`=subtype tag 🟡 · `[9]`=small int (mostly `0a`) 🟡 · `[10:15]`=**5-channel motion**
+(see below) 🟢 · `[15:22]`=7-B per-epoch physiology payload 🟡 · `[22]`=trailer flags 🟡.
+Idle/unworn template: `[4:7]=05 00 0c 00`, `[9]=0a`, `[10:14]=01×5`, `[15:21]=00×7` 🟢.
+
+**+0x96 counter step = exactly 150 s** (the counter is seconds, §5.6) → **each record
+is a 150 s / 2.5-min epoch.** 🟢 Confirmed by `captures/sleep_sync_btsnoop.log`
+(FR02.018, full multi-day history sync, 470 records over 3 stored sessions). The last
+session decodes to **2026-06-13 23:09 → 06-14 09:32** and its end matches the bugreport
+pull time (09:38) to <6 min — counter→wall-clock is right and lands on **device-local**
+time (no 12 h offset in this capture; bears on §5.6/§6.6). Reassemble + decode with
+`desktop/decode_bulk.py`.
+
+- **`[10:15]` = 5× per-30 s motion/activity counts** 🟢(role)/🟡(unit). Over a real
+  night they decay from `~14 15 15 14` (≈20, awake/settling at 23:09) to the `01 01 01
+  01 01` baseline (still/asleep by 23:37), and spike again at arousals/turns — i.e. the
+  per-epoch **stillness signal** Phase 5 `SleepDetection` needs (likely the IMU stream,
+  no separate `0x47` accel needed for staging). Baseline `01` = "still", not "unworn".
+- **`[15:22]` = 7-B per-epoch physiology** (HR / HRV / SpO2?) 🔴-values/🟡-role. Dense
+  every epoch during main sleep (23:37–01:34), then **sparse** (mostly the zero/idle
+  template with a non-zero spot-check every ~15 min) for the rest of the night — a
+  low-power sampling regime, not deep sleep. Zero ≠ asleep; zero = no measurement.
+- **`[8]` subtype**: `0x12` is the common epoch (idle alternates `12`/`13`); a
+  `0x5a–0x63` family recurs roughly every ~10–15 min as marker/summary epochs 🟡.
+
+> **Blocker to 🟢 on values:** assigning the 7 physiology bytes to HR/HRV/SpO2 needs the
+> RingConn app's timestamped per-epoch readout for the **same night** (§6.2 / issue #7).
+> Structure, framing, epoch cadence and the motion channel are decoded; the payload
+> bytes are not yet pinned to units.
 
 ### 5.4 `0x10` / `0x87` — fixed 19-byte descriptor
 `0x10` ← `d0 00 00` (also spontaneous ~30–60 s); `0x87` ← `07 00 00`. **Identical
@@ -211,9 +235,14 @@ block is a candidate nonce source 🔴.
 Each names the single capture that converts a 🟡/🔴 field into a decoded metric.
 1. **`0x47` → real PPG:** app's realtime/exported PPG trace recorded over the *same*
    window as a btsnoop sync → confirms bit-width, channel, counter time-unit.
-2. **`0x4c` → sleep/HR/HRV/SpO2 epochs:** one fully app-logged night with timestamped
-   per-epoch values + session start/end → map the `+0x96` counter and payload bytes.
-3. **Counter→wall-clock:** two syncs a known gap apart (ring worn) → pins counter units.
+2. **`0x4c` → sleep/HR/HRV/SpO2 epochs:** ⏳ *capture obtained* — a real overnight sync
+   is in `captures/sleep_sync_btsnoop.log` (2026-06-13 night). Framing, 150 s epoch
+   cadence and the `[10:15]` motion channel are decoded (§5.3); **still needs** the app's
+   timestamped per-epoch HR/HRV/SpO2 + sleep-stage boundaries for that night to pin the
+   `[15:22]` payload bytes to units. (Issue #7.)
+3. ✅ **Counter→wall-clock — PINNED.** Counter is seconds (§5.6 epoch); the bulk-record
+   step `+0x96` = **150 s**, so each `0x4c` record is a 2.5-min epoch and `0x47` records
+   span `0x0384`=900 s. Cross-checked: last session ends 6 min before the sync. (Issue #3.)
 4. **`0x10`/`0x87` `[6:8]`/`[15]`:** sync after a known wear interval + app UI/battery
    screenshot → maps A/B to record counts and `[15]` to a real quantity.
 5. **`0x81` token vs battery:** repeat `01 00 00` within a session & across battery
