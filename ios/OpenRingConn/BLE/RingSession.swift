@@ -30,6 +30,10 @@ final class RingSession: NSObject {
     private(set) var steps: Int?          // ring onboard step count (0x10/0x87 [4:6], §5.4)
     private(set) var liveMode: LiveMode = .hr
     private(set) var monitoring = false
+    /// True during the open→drain phase before the live stream starts. The ring won't
+    /// emit live frames until its history backlog is fully drained, so we surface this
+    /// so the UI shows "preparing" instead of a dead reading.
+    private(set) var livePreparing = false
     private(set) var lastFrame: String?
     private(set) var ready = false
 
@@ -53,6 +57,8 @@ final class RingSession: NSObject {
     private var syncTask: Task<Void, Never>?
     private var syncDone = false        // 0x50 end-of-history seen
     private var syncQuietTicks = 0      // seconds since the last page arrived
+    private var drainSawPage = false    // a 0x47/0x4c page arrived since last check (live-enter drain)
+    private var drainDone = false       // 0x50 end-of-history seen during live-enter drain
 
     private let peripheral: CBPeripheral
     private var notifyChar: CBCharacteristic?
@@ -68,10 +74,11 @@ final class RingSession: NSObject {
         peripheral.discoverServices(nil)
     }
 
-    /// Begin live monitoring: open the session at *now* (so there's no history backlog
-    /// to drain and flood the link), enter HR mode (`d0` → `06 01 00` → fetch), then poll
-    /// `95 00 00` ~1/s. Writes are paced ~300 ms apart so CoreBluetooth doesn't drop them.
-    /// Updates `liveHR`/`liveSpO2`. Idempotent.
+    /// Begin live monitoring. The ring will NOT emit live frames until its pending
+    /// history backlog is fully drained (PROTOCOL.md §5.1 / livehr.py): open the sync
+    /// session (cursor 0xFFFFFFFF), drain every 0x47/0x4c page to completion, THEN
+    /// `d0` → mode (`06 01`/`06 02`) → fetch, then poll `95 00 00`. Entering live mode
+    /// before the drain finishes leaves HR stuck at the warm-up sentinel (8). Idempotent.
     func startLiveMonitoring() {
         guard monitorTask == nil else { return }
         // Live and history sync can't coexist (ring is one mode at a time). Cancel any
@@ -79,28 +86,53 @@ final class RingSession: NSObject {
         syncTask?.cancel(); syncTask = nil
         syncing = false
         monitoring = true
+        livePreparing = true
         liveHRTrend.removeAll()   // fresh convergence window
         liveHRWarmup = nil
+        bulkRecords.removeAll()   // any pages we drain below land here (don't lose them)
+        drainSawPage = false
+        drainDone = false
         let modeCmd = liveMode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
-        // Proven enter sequence (PROTOCOL.md §5.1): open session, drain a history record
-        // (the extra `fetch`), then d0 status query → mode byte → fetch. The history
-        // drain + d0 are what reliably leaves bulk mode so the live stream starts.
-        let enterSeq: [[UInt8]] = [Command.status0, Command.status1, Command.syncAll,
-                                   Command.fetch, Command.statusQuery, modeCmd, Command.fetch]
         monitorTask = Task { [weak self] in
-            for cmd in enterSeq {
-                guard let self else { return }
+            // 1. Init + open the sync session (cursor = everything; verified, §5.6).
+            for cmd in [Command.status0, Command.status1, Command.syncAll] {
+                guard let self, !Task.isCancelled else { return }
                 self.write(cmd)
-                try? await Task.sleep(for: .milliseconds(300))
+                try? await Task.sleep(for: .milliseconds(250))
             }
-            // Pure polling only. Do NOT inject `d0` (status query) here to refresh steps:
-            // d0 re-arms the mode switch and kicks the HR session back to its warm-up
-            // sentinel (byte[2]=8), so the reading never climbs. Steps refresh from the
-            // ring's spontaneous 0x10/0x87 frames instead.
+            // 2. CRITICAL: drain the history backlog to completion before live mode.
+            //    Pages are acked in didUpdateValue; wait for the 0x50 end marker or
+            //    ~1.5 s of quiet (cap ~15 s for a large overnight backlog).
+            guard let s0 = self, !Task.isCancelled else { return }
+            s0.write(Command.fetch)
+            var quiet = 0
+            for _ in 0 ..< 30 {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self, !Task.isCancelled else { return }
+                if self.drainDone { break }
+                if self.drainSawPage { self.drainSawPage = false; quiet = 0 }
+                else { quiet += 1; if quiet >= 3 { break } }
+            }
+            // Surface anything drained so overnight sleep/vitals aren't lost — the ring
+            // discards delivered pages, so this is the only chance to keep them.
+            if let self, !self.bulkRecords.isEmpty {
+                self.historySamples = BulkSleep.samples(from: self.bulkRecords)
+                self.sleepSegments = BulkSleep.sleepSegments(from: self.bulkRecords)
+                self.stagedSegments = BulkSleep.stagedSegments(from: self.bulkRecords)
+            }
+            // 3. Leave bulk mode and enter the selected live mode.
+            for cmd in [Command.statusQuery, modeCmd, Command.fetch] {
+                guard let self, !Task.isCancelled else { return }
+                self.write(cmd)
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            self?.livePreparing = false
+            // 4. Poll for live samples (~1.4/s). No `d0` here — it re-arms the mode
+            //    switch and kicks HR back to its warm-up sentinel.
             while !Task.isCancelled {
                 guard let self else { return }
                 self.write(Command.poll)
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .milliseconds(700))
             }
         }
     }
@@ -145,6 +177,7 @@ final class RingSession: NSObject {
         monitorTask?.cancel()
         monitorTask = nil
         monitoring = false
+        livePreparing = false
     }
 
     /// Pull stored history: open the sync session (cursor = everything) and fetch.
@@ -244,17 +277,20 @@ extension RingSession: CBPeripheralDelegate {
             // Bulk history pages: accumulate + ack to continue draining (47→c7, 4c→cc).
             switch bytes.first {
             case 0x47:
+                self.drainSawPage = true
                 if self.syncing { self.syncQuietTicks = 0 }
                 self.write(Command.pageAck47); return   // PPG page — decode TODO (issue #8)
             case 0x4C:
-                if self.syncing {
+                self.drainSawPage = true
+                if self.syncing || self.livePreparing {   // keep records during a sync OR a live-enter drain
                     self.bulkRecords += BulkSleep.records(fromPage: bytes)
                     self.syncQuietTicks = 0
                 }
                 self.write(Command.pageAck4C); return   // always ack to keep draining
             case 0x50:
                 // End-of-history cursor report (§5.5) — NO XOR trailer, so it never
-                // reaches Frame.parse. Mark done; the sync watchdog finalizes.
+                // reaches Frame.parse. Mark done; the sync watchdog / live-enter drain finalizes.
+                self.drainDone = true
                 if self.syncing { self.syncDone = true }
                 return
             default: break

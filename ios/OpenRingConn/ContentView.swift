@@ -70,7 +70,11 @@ struct ContentView: View {
             if hrActive() {
                 // Optical HR is a windowed average that climbs over ~20–60 s of stillness,
                 // so show the trend/warm-up rather than one misleading number.
-                if let trend = session?.liveHRTrend, trend.count >= 2 {
+                if session?.livePreparing == true {
+                    Label("Preparing… syncing the ring's history first",
+                          systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else if let trend = session?.liveHRTrend, trend.count >= 2 {
                     let lo = trend.min() ?? 0, hi = trend.max() ?? 0
                     VStack(alignment: .leading, spacing: 2) {
                         Text(trend.map(String.init).joined(separator: "  "))
@@ -105,7 +109,8 @@ struct ContentView: View {
             bigReading(session?.liveSpO2, unit: "%", color: .blue, active: spo2Active())
 
             if spo2Active() {
-                Text(session?.liveSpO2 == nil ? "Measuring… hold still." : "Measuring — live.")
+                Text(session?.livePreparing == true ? "Preparing… syncing the ring's history first"
+                     : session?.liveSpO2 == nil ? "Measuring… hold still." : "Measuring — live.")
                     .font(.caption2).foregroundStyle(.secondary)
             } else if session?.liveSpO2 != nil {
                 Text("Last reading — tap Measure to refresh.")
