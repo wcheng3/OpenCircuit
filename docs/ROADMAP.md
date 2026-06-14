@@ -26,8 +26,10 @@ Validate the spec cheaply before committing to Swift.
 - [x] Port the validated **framing codec** to Swift — `ios/OpenRingKit` SwiftPM
       package (`Frame`, `Opcode`, `LiveHR`), tested against real FR02.018 capture
       frames. Builds/tests without Xcode via `swift run RingKitVerify`.
-- [ ] Port **per-metric parsers** (blocked: needs decoded metric formats — sleep/
-      SpO2/HRV/steps/temp captures are 🔴 in PROTOCOL.md §5).
+- [x] Port **sleep-vitals parser** — `OpenRingKit/BulkSleep.swift` decodes `0x4c`
+      history pages → HR/HRV/SpO2 per-epoch `QuantitySample`s (PROTOCOL.md §5.3 🟢,
+      app-confirmed). Tested against real 2026-06-13 sync frames. Steps/temp/RR parsers
+      still pending their formats (🟡/🔴).
 - [x] **Xcode app target** — `ios/project.yml` (XcodeGen) generates `OpenRingConn`
       (bundle `com.openringconn.app`, iOS 17, embeds OpenRingKit, HealthKit + BLE
       Info.plist keys + `bluetooth-central` background mode). **Compiles** for the
@@ -35,6 +37,8 @@ Validate the spec cheaply before committing to Swift.
 - [x] **CoreBluetooth glue** — `BLE/RingScanner.swift` (scan by confirmed name
       prefix, connect) + `RingSession.swift` (discover notify/write chars by UUID,
       enable notify, poll live HR via OpenRingKit.Frame, decode 0x15 frames).
+      `syncHistory()` drains `0x4c` pages → `BulkSleep` → HR/HRV/SpO2 samples,
+      finalized on `0x50` end-of-history; ContentView writes them to HealthKit.
 - [x] **HealthKitWriter** — auth + per-type write/units per HEALTHKIT_MAPPING.md.
 - [x] **Metric models + SyncCursor** — `Metrics.swift` + `SyncCursor.swift`, tested.
 - [x] **LocalStore (SwiftData)** — StoredSample/StoredCursor wrapping SyncCursor.
