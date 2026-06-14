@@ -55,72 +55,58 @@ struct ContentView: View {
 
     // MARK: Live
 
-    private var liveModeBinding: Binding<RingSession.LiveMode> {
-        Binding(get: { session?.liveMode ?? .hr },
-                set: { session?.setLiveMode($0) })
-    }
+    private func hrActive() -> Bool { session?.monitoring == true && session?.liveMode == .hr }
+    private func spo2Active() -> Bool { session?.monitoring == true && session?.liveMode == .spo2 }
 
     private var liveCard: some View {
         card {
-            HStack {
-                Text("LIVE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Spacer()
-                if session?.monitoring == true { ProgressView().controlSize(.small) }
-            }
-            // Primary reading = whichever mode the ring is actively measuring.
-            let measuringHR = session?.liveMode != .spo2
+            Text("LIVE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+
+            // Big reading = the metric currently being measured (or HR placeholder).
+            let showingSpO2 = spo2Active()
             HStack(alignment: .center, spacing: 18) {
-                Image(systemName: measuringHR ? "heart.fill" : "lungs.fill")
+                Image(systemName: showingSpO2 ? "lungs.fill" : "heart.fill")
                     .font(.system(size: 42))
-                    .foregroundStyle(measuringHR ? .red : .blue)
+                    .foregroundStyle(showingSpO2 ? .blue : .red)
                     .symbolEffect(.pulse, isActive: session?.monitoring == true)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    if measuringHR {
-                        Text(session?.liveHR.map(String.init) ?? "—")
-                            .font(.system(size: 64, weight: .bold, design: .rounded))
-                            .monospacedDigit().contentTransition(.numericText())
-                            .animation(.snappy, value: session?.liveHR)
-                        Text("BPM").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
-                    } else {
-                        Text(session?.liveSpO2.map(String.init) ?? "—")
-                            .font(.system(size: 64, weight: .bold, design: .rounded))
-                            .monospacedDigit().contentTransition(.numericText())
-                            .animation(.snappy, value: session?.liveSpO2)
-                        Text("%").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
-                    }
+                    Text((showingSpO2 ? session?.liveSpO2 : session?.liveHR).map(String.init) ?? "—")
+                        .font(.system(size: 64, weight: .bold, design: .rounded))
+                        .monospacedDigit().contentTransition(.numericText())
+                        .animation(.snappy, value: showingSpO2 ? session?.liveSpO2 : session?.liveHR)
+                    Text(showingSpO2 ? "%" : "BPM")
+                        .font(.title3.weight(.semibold)).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
-            // Secondary reading (last value of the other metric).
-            HStack(spacing: 16) {
-                if let hr = session?.liveHR, !measuringHR {
-                    Label("\(hr) bpm", systemImage: "heart.fill").foregroundStyle(.red)
-                }
-                if let spo2 = session?.liveSpO2, measuringHR {
-                    Label("\(spo2)%", systemImage: "lungs.fill").foregroundStyle(.blue)
-                }
-            }
-            .font(.subheadline)
 
-            Picker("Measure", selection: liveModeBinding) {
-                Text("Heart rate").tag(RingSession.LiveMode.hr)
-                Text("SpO₂").tag(RingSession.LiveMode.spo2)
+            // Two mutually-exclusive buttons: starting one switches the ring's mode so
+            // the other stops reading (ring measures one metric at a time).
+            HStack(spacing: 12) {
+                liveButton(.hr, title: "Heart rate", active: hrActive(), color: .red,
+                           icon: "heart.fill")
+                liveButton(.spo2, title: "SpO₂", active: spo2Active(), color: .blue,
+                           icon: "lungs.fill")
             }
-            .pickerStyle(.segmented)
-            .disabled(session?.ready != true)
-
-            Button {
-                if session?.monitoring == true { session?.stopLiveMonitoring() }
-                else { session?.startLiveMonitoring() }
-            } label: {
-                Label(session?.monitoring == true ? "Stop" : "Start live",
-                      systemImage: session?.monitoring == true ? "stop.fill" : "play.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .tint(session?.monitoring == true ? .red : .accentColor)
-            .disabled(session?.ready != true)
+            Text(session?.monitoring == true
+                 ? "Measuring \(showingSpO2 ? "SpO₂" : "heart rate") — the other is off."
+                 : "Pick one to start. Only one reads at a time.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
+    }
+
+    private func liveButton(_ mode: RingSession.LiveMode, title: String,
+                            active: Bool, color: Color, icon: String) -> some View {
+        Button {
+            if active { session?.stopLiveMonitoring() }
+            else { session?.startMonitoring(mode: mode) }
+        } label: {
+            Label(active ? "Stop" : title, systemImage: active ? "stop.fill" : icon)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(active ? color : Color(.systemGray3))
+        .disabled(session?.ready != true)
     }
 
     // MARK: Sync + Health

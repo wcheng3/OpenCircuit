@@ -79,6 +79,18 @@ final class RingSession: NSObject {
         }
     }
 
+    /// Start (or switch) live monitoring in a single mode. Guarantees only one metric
+    /// reads at a time: switching to a mode puts the ring in `06 01`/`06 02`, so frames
+    /// for the other metric stop arriving.
+    func startMonitoring(mode: LiveMode) {
+        if monitoring {
+            setLiveMode(mode)
+        } else {
+            liveMode = mode
+            startLiveMonitoring()
+        }
+    }
+
     /// Switch live measurement between HR (`06 01 00`) and SpO2 (`06 02 00`). The ring
     /// measures one at a time; the other metric keeps its last value. No-op until the
     /// next start if not currently monitoring.
