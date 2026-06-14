@@ -67,9 +67,9 @@ Validate the spec cheaply before committing to Swift.
 > build-verified only (no app-target test target yet). Live-HR samples aren't persisted
 > (only history sync routes through the store). Functional run needs device + ring.
 > **The only blocker to actually writing Health is the HealthKit entitlement, which needs
-> a paid Apple Developer account.** Enable on a paid team with one command —
-> `HEALTHKIT_ENTITLEMENTS=OpenRingConn/OpenRingConn.entitlements xcodegen generate` — then
-> set your team (see HANDOFF). Free-team builds keep working (entitlement empty, auth no-ops).
+> a paid Apple Developer account.** On a paid team, uncomment the `entitlements:` block in
+> `ios/project.yml`, `xcodegen generate`, and pick your team (see HANDOFF). Do NOT set the
+> entitlement on a free team — it breaks device launch (pre-main libxpc crash).
 **Exit:** ring metrics appear in Apple Health, no cloud involved.
 
 ## Phase 5 — Analytics (port from openwhoop)

@@ -61,14 +61,13 @@ paid Apple Developer Program membership** — a free personal team cannot provis
 
 ### Turn it on when you have the paid account
 1. Join the Apple Developer Program ($99/yr); add your Apple ID to Xcode.
-2. Generate the project WITH the entitlement (one command, no YAML edit):
+2. In `ios/project.yml`, **uncomment the `entitlements:` block** under the OpenRingConn
+   target (it's right above `settings:`), then regenerate:
    ```
-   cd ios
-   HEALTHKIT_ENTITLEMENTS=OpenRingConn/OpenRingConn.entitlements xcodegen generate
+   cd ios && xcodegen generate
    ```
-   (Unset = free-team default, no entitlement. The flag bakes
-   `OpenRingConn/OpenRingConn.entitlements` — which sets `com.apple.developer.healthkit` —
-   into `CODE_SIGN_ENTITLEMENTS`.)
+   (Do NOT set `CODE_SIGN_ENTITLEMENTS` on a free team — it breaks device launch with a
+   pre-main libxpc crash. Only add the entitlement once you actually have the paid team.)
 3. Open `OpenRingConn.xcodeproj` → OpenRingConn target → Signing & Capabilities → pick
    your **Team** (sets `DEVELOPMENT_TEAM`). Automatic signing registers the App ID
    `com.openringconn.app` and enables the HealthKit capability for it.

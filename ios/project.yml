@@ -30,6 +30,14 @@ targets:
         # Background sync while suspended (docs/HANDOFF_MACOS_IOS.md).
         UIBackgroundModes:
           - bluetooth-central
+    # HealthKit entitlement intentionally OMITTED for free-team signing (it needs a
+    # paid Apple Developer account, and setting CODE_SIGN_ENTITLEMENTS on a free team
+    # breaks device launch — see git history). BLE works; HealthKit auth no-ops at
+    # runtime. When you have a paid team, UNCOMMENT this block and re-run
+    # `xcodegen generate`, then pick your team in Xcode (see docs/HANDOFF_MACOS_IOS.md):
+    #   entitlements:
+    #     path: OpenRingConn/OpenRingConn.entitlements
+    #     properties: { com.apple.developer.healthkit: true }
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.openringconn.app
@@ -38,13 +46,6 @@ targets:
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
-        # HealthKit entitlement is GATED on a paid Apple Developer account (free-team
-        # signing can't provision it). Default (env unset) = empty = no entitlement, so
-        # free-team builds work and HealthKit auth no-ops at runtime. On a paid team,
-        # turn it on with ONE command — no YAML edit:
-        #   HEALTHKIT_ENTITLEMENTS=OpenRingConn/OpenRingConn.entitlements xcodegen generate
-        # then set your team and build. See docs/HANDOFF_MACOS_IOS.md.
-        CODE_SIGN_ENTITLEMENTS: ${HEALTHKIT_ENTITLEMENTS}
         # On-device signing. Xcode fills DEVELOPMENT_TEAM when you pick your team
         # (or set it here to your 10-char Team ID for CLI builds).
         CODE_SIGN_STYLE: Automatic
