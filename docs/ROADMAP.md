@@ -20,10 +20,20 @@ Validate the spec cheaply before committing to Swift.
 **Exit:** one full day of the ring's data pulled offline, matching the app.
 
 ## Phase 3 — iOS app skeleton
+- [x] Port the validated **framing codec** to Swift — `ios/OpenRingKit` SwiftPM
+      package (`Frame`, `Opcode`, `LiveHR`), tested against real FR02.018 capture
+      frames. Builds/tests without Xcode via `swift run RingKitVerify`.
+- [ ] Port **per-metric parsers** (blocked: needs decoded metric formats — sleep/
+      SpO2/HRV/steps/temp captures are 🔴 in PROTOCOL.md §5).
 - [ ] Xcode project under `ios/`; CoreBluetooth scan/connect to the ring.
-- [ ] Port the validated codec (framing + per-metric parsers) to Swift.
+      (blocked: needs full Xcode + iOS SDK; CLT-only can't build CoreBluetooth.)
 - [ ] Local store (SwiftData) + per-metric sync cursor; background BLE sync.
+- [ ] XCTest suite (`OpenRingKitTests`) — written; runs once Xcode is installed.
 **Exit:** iOS app pulls the same data the desktop client does.
+
+> **Tooling note:** the dev Mac has Swift 6.3 (Command Line Tools) but **not full
+> Xcode**. Pure-Swift logic (codec, analytics) builds/tests now via SwiftPM; the
+> BLE/HealthKit/SwiftData/app-target work needs Xcode + iOS SDK installed first.
 
 ## Phase 4 — HealthKit write
 - [ ] Map each metric per `HEALTHKIT_MAPPING.md`; request authorizations.
