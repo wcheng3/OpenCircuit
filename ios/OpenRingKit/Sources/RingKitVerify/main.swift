@@ -84,5 +84,32 @@ check(cursor.last(.heartRate) == t2, "cursor advanced to t2; never backward")
 cursor.advance(.heartRate, to: t0)
 check(cursor.last(.heartRate) == t2, "advance() never moves cursor backward")
 
+// --- Analytics (ported from openwhoop-algos) ---
+// HRV / RMSSD
+check(HRV.rmssd([800, 900, 1000]) == 100, "rmssd([800,900,1000]) = 100")
+check(HRV.rmssd([800]) == nil, "rmssd single sample = nil")
+check(HRV.cleanRR([[800, 900], [1000], []]) == [800, 900, 1000], "cleanRR flattens")
+check(HRV.cleanRR([[0, 900], [0]]) == [900], "cleanRR drops non-positive")
+check(HRV.rollingRMSSD([1, 2, 3], windowSize: 2) == [1, 1], "rollingRMSSD windows of 2")
+
+// Stress (Baevsky index)
+check(Stress.index(rr: Array(repeating: 750, count: 120)) == 10.0, "constant RR -> max stress 10.0")
+let moderate = Stress.index(rr: [667, 619, 583, 556, 531, 556, 600, 632, 612, 600, 612, 625, 638])
+check(moderate > 0.0 && moderate <= 10.0, "moderate variability stress in (0,10]: \(moderate)")
+
+// Strain (Edwards TRIMP, HRR zones); maxHR=190, restingHR=60
+let strain = Strain(maxHR: 190, restingHR: 60)
+check(strain.calculate(bpms: Array(repeating: 65, count: 600)) == 0.0, "65bpm below zone1 -> strain 0")
+check(strain.calculate(bpms: Array(repeating: 190, count: 86400)) == 21.0, "24h@maxHR -> strain 21.0")
+check((strain.calculate(bpms: Array(repeating: 170, count: 1800)) ?? 0) > 10.0, "sustained 170bpm -> strain >10")
+check(strain.calculate(bpms: Array(repeating: 80, count: 500)) == nil, "too few readings -> nil")
+check(Strain(maxHR: 60, restingHR: 60).calculate(bpms: Array(repeating: 80, count: 600)) == nil,
+      "maxHR<=restingHR -> nil")
+
+// Sleep score (integer-ratio model, faithful to openwhoop)
+check(SleepScore.score(durationSeconds: 8 * 3600) == 100.0, "8h sleep -> 100")
+check(SleepScore.score(durationSeconds: 4 * 3600) == 0.0, "4h sleep -> 0 (integer ratio)")
+check(SleepScore.score(durationSeconds: 24 * 3600) == 100.0, "24h sleep -> clamped 100")
+
 print(failures == 0 ? "\nALL CHECKS PASSED" : "\n\(failures) CHECK(S) FAILED")
 exit(failures == 0 ? 0 : 1)

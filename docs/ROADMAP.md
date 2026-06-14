@@ -45,8 +45,20 @@ Validate the spec cheaply before committing to Swift.
 **Exit:** ring metrics appear in Apple Health, no cloud involved.
 
 ## Phase 5 — Analytics (port from openwhoop)
-- [ ] Port sleep detection, HRV analysis, strain/stress scoring to Swift.
-- [ ] Write derived metrics to HealthKit / app UI.
+- [x] Port **HRV (RMSSD)**, **stress (Baevsky index)**, **strain (Edwards TRIMP)**,
+      and **sleep score** to Swift in `OpenRingKit/Analytics/`, with tests mirroring
+      openwhoop's own Rust vectors (exact calibration anchors match: strain 21.0 at
+      24h@maxHR, stress 10.0 at constant RR).
+- [ ] Port **sleep-cycle detection** (activity.rs ActivityPeriod + sleep staging) —
+      device-agnostic algorithm; defer until we confirm the ring's HR/RR/IMU stream.
+- [ ] Wire analytics to real decoded metrics (blocked: RR-interval availability &
+      sample cadence are 🔴 in PROTOCOL.md §5 — needs a capture).
+- [ ] Write derived metrics to HealthKit / app UI (Phase 4 dependency).
+
+> ⚠️ The ported analytics assume per-beat **RR intervals** and ~1 Hz HR (Whoop's
+> stream shape). Whether RingConn exposes RR at all is unconfirmed — the math is
+> ready, but its inputs must be validated against a real capture before trusting
+> derived HRV/stress/strain numbers.
 
 ## Known risks
 - **Encryption / auth.** If the BLE link or app layer is encrypted with a
