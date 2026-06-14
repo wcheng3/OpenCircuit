@@ -21,7 +21,9 @@ struct ContentView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     connectionCard
-                    liveCard
+                    hrCard
+                    spo2Card
+                    stepsCard
                     syncCard
                     debugCard
                 }
@@ -53,37 +55,21 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Live
+    // MARK: Live — two independent sections, but only one reads at a time
 
     private func hrActive() -> Bool { session?.monitoring == true && session?.liveMode == .hr }
     private func spo2Active() -> Bool { session?.monitoring == true && session?.liveMode == .spo2 }
 
-    private var liveCard: some View {
+    /// Heart-rate section. Shows its own latest reading; the value persists as the last
+    /// reading whenever SpO₂ has taken the link (ring measures one metric at a time).
+    private var hrCard: some View {
         card {
-            Text("LIVE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            metricHeader("HEART RATE", icon: "heart.fill", color: .red, active: hrActive())
+            bigReading(session?.liveHR, unit: "BPM", color: .red, active: hrActive())
 
-            // Big reading = the metric currently being measured (or HR placeholder).
-            let showingSpO2 = spo2Active()
-            HStack(alignment: .center, spacing: 18) {
-                Image(systemName: showingSpO2 ? "lungs.fill" : "heart.fill")
-                    .font(.system(size: 42))
-                    .foregroundStyle(showingSpO2 ? .blue : .red)
-                    .symbolEffect(.pulse, isActive: session?.monitoring == true)
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text((showingSpO2 ? session?.liveSpO2 : session?.liveHR).map(String.init) ?? "—")
-                        .font(.system(size: 64, weight: .bold, design: .rounded))
-                        .monospacedDigit().contentTransition(.numericText())
-                        .animation(.snappy, value: showingSpO2 ? session?.liveSpO2 : session?.liveHR)
-                    Text(showingSpO2 ? "%" : "BPM")
-                        .font(.title3.weight(.semibold)).foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
-            // HR convergence trend: optical HR is a windowed average that climbs over
-            // ~20–60 s of stillness, so a single number is misleading. Show the recent
-            // samples + range so a stuck vs. converging reading is obvious.
-            if !showingSpO2 {
+            if hrActive() {
+                // Optical HR is a windowed average that climbs over ~20–60 s of stillness,
+                // so show the trend/warm-up rather than one misleading number.
                 if let trend = session?.liveHRTrend, trend.count >= 2 {
                     let lo = trend.min() ?? 0, hi = trend.max() ?? 0
                     VStack(alignment: .leading, spacing: 2) {
@@ -94,37 +80,48 @@ struct ContentView: View {
                                       : "range \(lo)–\(hi) bpm (converging)")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
-                } else if session?.monitoring == true, session?.liveHR == nil,
-                          let warm = session?.liveHRWarmup {
-                    // Short HR frames ARE arriving but byte[2] is still climbing out of
-                    // warm-up — tell the user to hold still rather than showing a dead "—".
+                } else if session?.liveHR == nil, let warm = session?.liveHRWarmup {
                     Label("Warming up… (\(warm)) — hold still, keep the ring snug",
                           systemImage: "hourglass")
                         .font(.caption2).foregroundStyle(.orange)
-                } else if session?.monitoring == true, session?.liveHR == nil {
+                } else if session?.liveHR == nil {
                     Text("Waiting for HR frames… if this never moves, the ring isn't in HR mode.")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
+            } else if session?.liveHR != nil {
+                Text("Last reading — tap Measure to refresh.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
 
-            // Two mutually-exclusive buttons: starting one switches the ring's mode so
-            // the other stops reading (ring measures one metric at a time).
-            HStack(spacing: 12) {
-                liveButton(.hr, title: "Heart rate", active: hrActive(), color: .red,
-                           icon: "heart.fill")
-                liveButton(.spo2, title: "SpO₂", active: spo2Active(), color: .blue,
-                           icon: "lungs.fill")
-            }
-            Text(session?.monitoring == true
-                 ? "Measuring \(showingSpO2 ? "SpO₂" : "heart rate") — the other is off."
-                 : "Pick one to start. Only one reads at a time.")
-                .font(.caption2).foregroundStyle(.secondary)
+            liveButton(.hr, title: "Measure heart rate", active: hrActive(), color: .red,
+                       icon: "heart.fill")
+        }
+    }
 
-            // Always show the steps row once connected — hiding it when nil looked like
-            // "steps don't work." Ring's onboard count refreshes from the 0x10/0x87
-            // descriptor we re-request during monitoring.
-            if session?.ready == true {
-                Divider()
+    /// SpO₂ section — same shape, blue. Latest reading persists when HR has the link.
+    private var spo2Card: some View {
+        card {
+            metricHeader("BLOOD OXYGEN", icon: "lungs.fill", color: .blue, active: spo2Active())
+            bigReading(session?.liveSpO2, unit: "%", color: .blue, active: spo2Active())
+
+            if spo2Active() {
+                Text(session?.liveSpO2 == nil ? "Measuring… hold still." : "Measuring — live.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            } else if session?.liveSpO2 != nil {
+                Text("Last reading — tap Measure to refresh.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+
+            liveButton(.spo2, title: "Measure SpO₂", active: spo2Active(), color: .blue,
+                       icon: "lungs.fill")
+        }
+    }
+
+    /// Steps in its own compact card once connected.
+    @ViewBuilder
+    private var stepsCard: some View {
+        if session?.ready == true {
+            card {
                 let steps = session?.steps
                 Label(steps.map { "\($0) steps today" } ?? "Steps: waiting for ring…",
                       systemImage: "figure.walk")
@@ -136,6 +133,33 @@ struct ContentView: View {
         }
     }
 
+    private func metricHeader(_ title: String, icon: String, color: Color, active: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).foregroundStyle(active ? color : .secondary)
+                .symbolEffect(.pulse, isActive: active)
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Spacer()
+            if active {
+                Text("● MEASURING").font(.caption2.weight(.bold)).foregroundStyle(color)
+            }
+        }
+    }
+
+    private func bigReading(_ value: Int?, unit: String, color: Color, active: Bool) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(value.map(String.init) ?? "—")
+                .font(.system(size: 56, weight: .bold, design: .rounded))
+                .monospacedDigit().contentTransition(.numericText())
+                .foregroundStyle(active ? color : .primary)
+                .animation(.snappy, value: value)
+            Text(unit).font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+            Spacer()
+        }
+    }
+
+    /// Start/stop control for one metric. Starting one calls `startMonitoring(mode:)`,
+    /// which switches the ring's mode so the other stops reading — preserving the
+    /// "only one at a time" guarantee. Tapping the active one stops entirely.
     private func liveButton(_ mode: RingSession.LiveMode, title: String,
                             active: Bool, color: Color, icon: String) -> some View {
         Button {
