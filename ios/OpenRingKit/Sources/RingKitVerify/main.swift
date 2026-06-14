@@ -32,6 +32,9 @@ print("RingKitVerify — RingConn codec self-checks")
 check(Frame.xorTrailer([0x81, 0x00, 0xB0]) == 0x31, "response XOR trailer 81 00 b0 -> 31")
 check(Command.poll == [0x95, 0x00, 0x00], "poll command is verbatim 95 00 00 (not XOR'd)")
 check(Array(Command.syncAll[2...5]) == [0xFF, 0xFF, 0xFF, 0xFF], "syncAll cursor = 0xFFFFFFFF")
+check(Command.syncSince(unixSeconds: Command.syncEpoch + 0x0c2298c3)
+      == [0x02, 0x00, 0x0c, 0x22, 0x98, 0xc3, 0x00, 0x01, 0x00],
+      "syncSince builds 02 00 <cursor BE4> 00 01 00 (epoch 1577793600)")
 for f in realFrames { check(Frame.isValid(hex(f)), "real frame validates: \(f)") }
 
 var bad = hex("8100b031"); bad[1] ^= 0xFF

@@ -36,6 +36,20 @@ public enum Command {
 
     /// Steps to enter live-HR mode, in order (drain history between fetch/acks).
     public static let liveHRStart: [[UInt8]] = [status0, status1, syncAll, liveHRMode, fetch]
+
+    /// Sync-cursor epoch: seconds since 2019-12-31 12:00:00 UTC (🟢 confirmed,
+    /// PROTOCOL.md §5.6 — derived from 3 capture (time,cursor) pairs to <0.34 s).
+    public static let syncEpoch = 1_577_793_600
+
+    /// Build `02 00 <cursor BE4> 00 01 00` to open a sync session for data since
+    /// `unixSeconds` (cursor = unixSeconds − syncEpoch, big-endian). For "everything
+    /// pending" use `syncAll` (0xFFFFFFFF) — the reliable choice for live HR.
+    public static func syncSince(unixSeconds: Int) -> [UInt8] {
+        let c = UInt32(truncatingIfNeeded: max(0, unixSeconds - syncEpoch))
+        return [0x02, 0x00,
+                UInt8(c >> 24), UInt8((c >> 16) & 0xFF), UInt8((c >> 8) & 0xFF), UInt8(c & 0xFF),
+                0x00, 0x01, 0x00]
+    }
 }
 
 /// BLE transport handles (🟢). The ring is driven through this pair, not discrete

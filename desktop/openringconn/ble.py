@@ -46,5 +46,17 @@ KEEPALIVE_PAYLOAD = bytes.fromhex("950000")
 # afterwards. Sent verbatim — do not append a checksum.
 LIVE_HR_START_SEQ = [bytes.fromhex("060100"), bytes.fromhex("070000")]
 
+# Sync-cursor epoch: seconds since 2019-12-31 12:00:00 UTC (🟢 confirmed, PROTOCOL
+# §5.6). The 0x02 open-session command carries a 4-byte BE cursor in this space.
+SYNC_EPOCH = 1577793600
+SYNC_ALL = bytes.fromhex("0200ffffffff000100")  # "everything pending"
+
+
+def sync_cursor_cmd(unix_seconds: float) -> bytes:
+    """Build `02 00 <cursor BE4> 00 01 00` to sync data since unix_seconds."""
+    import struct
+    cursor = max(0, int(unix_seconds) - SYNC_EPOCH)
+    return bytes([0x02, 0x00]) + struct.pack(">I", cursor) + bytes([0x00, 0x01, 0x00])
+
 # Name prefixes to match while scanning (🟢 — observed "RingConn Gen2-<MAC suffix>").
 NAME_PREFIXES = ("RingConn", "Ring")

@@ -42,8 +42,9 @@ async def main():
 
         print("# init")
         await w("010000"); await w("010131826700"); await drain(1.5, False)
-        print("# open sync (cursor = all)")
-        await w("0200ffffffff000100"); await drain(1.5, False)
+        print("# open sync (cursor = all / 0xFFFFFFFF = everything pending)")
+        # For a targeted history-since-T sync instead, use ble.sync_cursor_cmd(unix).
+        await w(ble.SYNC_ALL.hex()); await drain(1.5, False)
         print("# fetch + drain history")
         await w("070000"); await drain(3.0, True)
         print("# d0 status + enter live-HR mode")

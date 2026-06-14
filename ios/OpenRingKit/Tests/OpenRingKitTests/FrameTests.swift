@@ -72,6 +72,14 @@ final class FrameTests: XCTestCase {
         XCTAssertTrue(Command.liveHRStart.contains(Command.syncAll))
     }
 
+    func testSyncCursorBuilder() {
+        // cursor = unix − 1577793600, big-endian; matches a captured cursor.
+        XCTAssertEqual(Command.syncSince(unixSeconds: Command.syncEpoch + 0x0c2298c3),
+                       [0x02, 0x00, 0x0c, 0x22, 0x98, 0xc3, 0x00, 0x01, 0x00])
+        // floors negative cursors to 0.
+        XCTAssertEqual(Array(Command.syncSince(unixSeconds: 0)[2...5]), [0, 0, 0, 0])
+    }
+
     func testLiveHRDecode() {
         // Real 0x15 frame from the capture: byte[2] = 0x5B = 91 bpm.
         XCTAssertEqual(LiveHR.decode(hex("15005b0ab0f4")), 91)
