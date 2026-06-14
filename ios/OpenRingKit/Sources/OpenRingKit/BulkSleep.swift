@@ -54,10 +54,15 @@ public struct BulkRecord: Equatable {
     }
 
     public var layout: Layout {
+        // A sleep-vitals epoch carries SpO2 in [8] even when motion is at baseline and
+        // the [15:22] payload is zero (common in deep sleep) — so check [8] FIRST, else
+        // those real epochs would be mistaken for the idle/unworn template and their
+        // HR/SpO2 dropped.
+        if (0x57...0x63).contains(raw[8]) { return .sleepVitals }
         if raw[10..<15] == [1, 1, 1, 1, 1] && raw[15..<22] == [0, 0, 0, 0, 0, 0, 0] {
             return .idle
         }
-        return (0x57...0x63).contains(raw[8]) ? .sleepVitals : .activity
+        return .activity
     }
 
     /// Heart rate in bpm — `[4]` on a sleep-vitals epoch (🟢). nil otherwise / when 0.
@@ -153,6 +158,88 @@ public enum BulkSleep {
                                      stage: p.activity == .sleep ? .asleepCore : .awake))
         }
         return segs
+    }
+
+    // MARK: - Experimental Deep/REM staging
+    //
+    // ⚠️ HEURISTIC, NOT VALIDATED PER-EPOCH. The ring sends no hypnogram (§5.3), so
+    // this estimates stages from HR + motion only: Awake = motion, Deep = HR in the
+    // lowest band, REM = HR in the highest band, else Light (≥5-min runs). Tuned on
+    // the 2026-06-13 night: it matches the app's stage TOTALS to ~13% (Awake 8 vs 13,
+    // REM 142 vs 115, Light 222 vs 242, Deep 100 vs 90 min) BUT does NOT reproduce the
+    // sleep ARCHITECTURE — that night it put Deep late / REM early (inverted vs the
+    // normal Deep-early/REM-late pattern), because HR alone can't place the cycles and
+    // the deepest HR fell just before sleep-onset. Treat output as approximate stage
+    // proportions, not trustworthy per-segment timing. `sleepSegments` (coarse
+    // asleep/awake) remains the non-experimental default.
+
+    public static let deepPercentile = 0.20
+    public static let remPercentile = 0.70
+    public static let awakeMotionThreshold = 15
+    public static let minStageRunEpochs = 2   // ~5 min
+
+    /// Experimental Light/Deep/REM/Awake staging of the detected sleep block.
+    /// See the caveat above — this is an approximation, not the ring's own staging.
+    public static func stagedSegments(from records: [BulkRecord],
+                                      epoch: Int = Command.syncEpoch) -> [SleepSegment] {
+        guard let block = mainSleep(from: records, epoch: epoch) else { return [] }
+        // Epochs inside the block, with forward-filled HR and motion magnitude.
+        let inBlock = records
+            .filter { $0.date(epoch: epoch) >= block.start && $0.date(epoch: epoch) <= block.end }
+            .sorted { $0.counter < $1.counter }
+        guard !inBlock.isEmpty else { return [] }
+
+        var lastHR: Int?
+        var rows: [(time: Date, hr: Int, motion: Int)] = []
+        for r in inBlock {
+            if let hr = r.heartRate { lastHR = hr }
+            guard let hr = lastHR else { continue }   // skip until first HR
+            let motion = r.motion.reduce(0) { $0 + ($1 == 1 ? 0 : Int($1)) }
+            rows.append((r.date(epoch: epoch), hr, motion))
+        }
+        guard rows.count >= 2 else { return [] }
+
+        // HR percentiles over "calm" (non-moving) epochs => the asleep HR distribution.
+        let calm = rows.filter { $0.motion <= awakeMotionThreshold }.map(\.hr).sorted()
+        let pool = calm.count >= 2 ? calm : rows.map(\.hr).sorted()
+        func pct(_ q: Double) -> Int { pool[Int(q * Double(pool.count - 1))] }
+        let deepHR = pct(deepPercentile), remHR = pct(remPercentile)
+
+        var stages: [SleepStage] = rows.map { row in
+            if row.motion > awakeMotionThreshold { return .awake }
+            if row.hr <= deepHR { return .asleepDeep }
+            if row.hr >= remHR { return .asleepREM }
+            return .asleepCore
+        }
+        // Drop too-short Deep/REM runs to Light (smoothing).
+        smoothShortRuns(&stages)
+
+        // Merge consecutive same-stage epochs into segments; each epoch spans to the next.
+        var segs = [SleepSegment(start: block.start, end: block.end, stage: .inBed)]
+        var i = 0
+        while i < rows.count {
+            var j = i
+            while j + 1 < rows.count && stages[j + 1] == stages[i] { j += 1 }
+            let end = j + 1 < rows.count ? rows[j + 1].time
+                : rows[j].time.addingTimeInterval(Double(BulkRecord.epochSeconds))
+            segs.append(SleepSegment(start: rows[i].time, end: min(end, block.end), stage: stages[i]))
+            i = j + 1
+        }
+        return segs
+    }
+
+    private static func smoothShortRuns(_ stages: inout [SleepStage]) {
+        let n = stages.count
+        var i = 0
+        while i < n {
+            var j = i
+            while j + 1 < n && stages[j + 1] == stages[i] { j += 1 }
+            let runLen = j - i + 1
+            if (stages[i] == .asleepDeep || stages[i] == .asleepREM) && runLen < minStageRunEpochs {
+                for k in i ... j { stages[k] = .asleepCore }
+            }
+            i = j + 1
+        }
     }
 
     /// HR / HRV / SpO2 samples from sleep-vitals epochs, with device timestamps.

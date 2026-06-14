@@ -53,6 +53,10 @@ struct ContentView: View {
                         LabeledContent("Sleep window",
                                        value: "\(inBed.start.formatted(date: .omitted, time: .shortened))–\(inBed.end.formatted(date: .omitted, time: .shortened))")
                     }
+                    if let staged = scanner.session?.stagedSegments, !staged.isEmpty {
+                        LabeledContent("Stages (experimental)", value: stageSummary(staged))
+                            .font(.caption)
+                    }
                     if let samples = scanner.session?.historySamples, !samples.isEmpty {
                         Button("Write to Apple Health") { writeToHealth(samples) }
                             .disabled(!healthAuthorized)
@@ -80,6 +84,14 @@ struct ContentView: View {
                 lastWrite = "error: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// "D 90m · R 115m · L 242m · W 13m" from staged segments (excludes inBed).
+    private func stageSummary(_ segs: [SleepSegment]) -> String {
+        func mins(_ stage: SleepStage) -> Int {
+            Int(segs.filter { $0.stage == stage }.reduce(0) { $0 + $1.duration } / 60)
+        }
+        return "D \(mins(.asleepDeep))m · R \(mins(.asleepREM))m · L \(mins(.asleepCore))m · W \(mins(.awake))m"
     }
 
     private var statusText: String {

@@ -190,5 +190,24 @@ check(BulkSleep.sleepSegments(from: night).contains { $0.stage == .inBed },
 check(BulkSleep.mainSleep(from: night.prefix(20).map { $0 }) == nil,
       "all-active -> no sleep block")
 
+// Experimental staging: low-HR region -> Deep, high-HR -> REM (sleep-vitals sub 0x62).
+func vrec(_ c: UInt32, motion: UInt8, hr: UInt8) -> BulkRecord {
+    var b = bulkRec(c, motion: motion, sub: 0x62).raw; b[4] = hr; return BulkRecord(b)!
+}
+var staged: [BulkRecord] = []
+var sc: UInt32 = 0x0c220000
+for _ in 0..<20 { staged.append(bulkRec(sc, motion: 0x14, sub: 0x12)); sc += 150 }
+for _ in 0..<60 { staged.append(vrec(sc, motion: 0x01, hr: 72)); sc += 150 }   // REM band
+for _ in 0..<60 { staged.append(vrec(sc, motion: 0x01, hr: 50)); sc += 150 }   // Deep band
+for _ in 0..<60 { staged.append(vrec(sc, motion: 0x01, hr: 60)); sc += 150 }   // Light
+for _ in 0..<20 { staged.append(bulkRec(sc, motion: 0x14, sub: 0x12)); sc += 150 }
+let stages = Set(BulkSleep.stagedSegments(from: staged).map { $0.stage })
+check(stages.contains(.asleepDeep) && stages.contains(.asleepREM) && stages.contains(.asleepCore),
+      "staging separates Deep/REM/Light by HR band (experimental)")
+// Regression: a sleep-vitals epoch with baseline motion + zero payload is NOT idle.
+let zeroPayloadSleep = BulkRecord(hex("0c22cd8b38520973620a01010101010000000000000004"))!
+check(zeroPayloadSleep.layout == .sleepVitals && zeroPayloadSleep.heartRate == 0x38,
+      "zero-payload sleep epoch keeps HR (not mistaken for idle)")
+
 print(failures == 0 ? "\nALL CHECKS PASSED" : "\n\(failures) CHECK(S) FAILED")
 exit(failures == 0 ? 0 : 1)

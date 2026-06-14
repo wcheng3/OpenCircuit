@@ -79,8 +79,14 @@ Validate the spec cheaply before committing to Swift.
       `0x4c [10:15]` motion channel (no gravity vector needed) into the same core;
       `BulkSleep.sleepSegments` → `inBed`/`asleepCore`/`awake` for HealthKit, surfaced in
       RingSession + ContentView. Validated on the 2026-06-13 night: detects in-bed
-      00:33→09:34 vs the app's ~00:32→09:30. Finer Deep/REM staging is a TODO (needs an
-      HR-based model — the ring sends no hypnogram).
+      00:33→09:34 vs the app's ~00:32→09:30.
+- [~] **Experimental Deep/REM staging** — `BulkSleep.stagedSegments` (HR-percentile
+      heuristic: Awake=motion, Deep=HR≤p20, REM=HR≥p70, else Light, ≥5-min runs).
+      Matches the night's stage TOTALS to ~13% (Deep 100 vs 90, REM 142 vs 115, Light
+      222 vs 242, Awake 8 vs 13 min) but **NOT the architecture** (put Deep late / REM
+      early — HR alone can't place cycles, and the deepest HR fell before sleep-onset).
+      Shown in-app as "experimental"; **only the coarse segments are written to
+      HealthKit**. A faithful hypnogram needs richer signal / per-epoch ground truth.
 - [ ] Wire **HRV/stress/strain** to real metrics (still gated: those assume per-beat
       RR intervals; the ring sends per-epoch HRV(ms)/HR, not RR — see note below).
 - [ ] Write derived metrics to HealthKit / app UI (Phase 4 dependency).

@@ -64,4 +64,6 @@ public struct SleepSegment: Equatable, Codable, Sendable {
         self.end = end
         self.stage = stage
     }
+
+    public var duration: TimeInterval { end.timeIntervalSince(start) }
 }

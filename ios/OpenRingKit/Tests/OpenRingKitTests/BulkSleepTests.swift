@@ -120,6 +120,42 @@ final class BulkSleepTests: XCTestCase {
                        Double(Int(wake) + Command.syncEpoch), accuracy: 20 * 60)
     }
 
+    /// Synthetic record with explicit HR (sleep-vitals layout).
+    func rec(_ counter: UInt32, motion: UInt8, sub: UInt8, hr: UInt8) -> BulkRecord {
+        let r = rec(counter, motion: motion, sub: sub)
+        var b = r.raw; b[4] = hr
+        return BulkRecord(b)!
+    }
+
+    func testStagingSeparatesDeepRemLight() {
+        var recs: [BulkRecord] = []
+        var c: UInt32 = 0x0c220000
+        for _ in 0..<20 { recs.append(rec(c, motion: 0x14, sub: 0x12)); c += 150 }   // awake
+        // still block: 60 high-HR (REM), 60 low-HR (Deep), 60 mid-HR (Light)
+        for _ in 0..<60 { recs.append(rec(c, motion: 0x01, sub: 0x62, hr: 72)); c += 150 }
+        for _ in 0..<60 { recs.append(rec(c, motion: 0x01, sub: 0x62, hr: 50)); c += 150 }
+        for _ in 0..<60 { recs.append(rec(c, motion: 0x01, sub: 0x62, hr: 60)); c += 150 }
+        for _ in 0..<20 { recs.append(rec(c, motion: 0x14, sub: 0x12)); c += 150 }   // awake
+
+        let segs = BulkSleep.stagedSegments(from: recs)
+        let stages = Set(segs.map(\.stage))
+        XCTAssertTrue(stages.contains(.inBed))
+        XCTAssertTrue(stages.contains(.asleepDeep), "low-HR region -> deep")
+        XCTAssertTrue(stages.contains(.asleepREM), "high-HR region -> REM")
+        XCTAssertTrue(stages.contains(.asleepCore), "mid-HR region -> light/core")
+        // Deep segment should fall in the low-HR (middle) third of the night.
+        let deep = segs.filter { $0.stage == .asleepDeep }.max(by: { $0.duration < $1.duration })!
+        let remSeg = segs.filter { $0.stage == .asleepREM }.max(by: { $0.duration < $1.duration })!
+        XCTAssertLessThan(remSeg.start, deep.start, "REM region (HR 72) precedes Deep region (HR 50) as constructed")
+    }
+
+    func testStagingEmptyWithoutSleep() {
+        var recs: [BulkRecord] = []
+        var c: UInt32 = 0x0c220000
+        for _ in 0..<50 { recs.append(rec(c, motion: 0x18, sub: 0x12, hr: 70)); c += 150 }
+        XCTAssertTrue(BulkSleep.stagedSegments(from: recs).isEmpty, "no sleep block -> no staging")
+    }
+
     func testNoSleepWhenAllActive() {
         var recs: [BulkRecord] = []
         var c: UInt32 = 0x0c220000
