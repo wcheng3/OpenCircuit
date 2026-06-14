@@ -74,13 +74,38 @@ def guess_checksum(frame: bytes, trailer_len: int | None = None) -> None:
               "wrong (try excluding a header byte, or include/exclude the opcode).")
 
 
-def decode_live_hr(payload: bytes) -> int | None:
-    """Best-known decode of the live-HR notification (handle 0x0804).
+def xor_trailer(body: bytes) -> int:
+    """RingConn frame checksum: XOR of every byte before the trailer (🟢 FR02.018).
 
-    Observation (🟡): a 7-bit field holds BPM (e.g. 0b1001100 = 76). The exact
-    byte offset is unconfirmed — this assumes the HR is the low 7 bits of the
-    last byte. Adjust once captures pin it down.
+    A whole frame is valid when ``xor_trailer(frame[:-1]) == frame[-1]``.
+    Verified against 86/88 response frames and the legacy `95 00 95` keepalive.
+    """
+    acc = 0
+    for b in body:
+        acc ^= b
+    return acc
+
+
+def frame_ok(frame: bytes) -> bool:
+    """True if the frame's last byte is the correct XOR trailer."""
+    return len(frame) >= 2 and xor_trailer(frame[:-1]) == frame[-1]
+
+
+def response_id(cmd: int) -> int:
+    """Response opcode for a command opcode: cmd XOR 0x80 (🟢)."""
+    return cmd ^ 0x80
+
+
+def decode_live_hr(payload: bytes) -> int | None:
+    """Best-known decode of a live-HR sample (0x15 frame, handle 0x0804).
+
+    Observation (🟡 FR02.018): in `0x95`-poll responses `15 00 <hr> 0a b0 <xor>`
+    byte[2] tracks a settling pulse (82->91 bpm across one reading). Offset still
+    needs a two-reading diff to lock down. Falls back to the legacy low-7-bits
+    guess for short/legacy payloads.
     """
     if not payload:
         return None
+    if len(payload) >= 4 and payload[0] == 0x15:
+        return payload[2]
     return payload[-1] & 0x7F
