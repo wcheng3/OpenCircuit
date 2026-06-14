@@ -44,7 +44,8 @@ Validate the spec cheaply before committing to Swift.
 - [x] **LocalStore (SwiftData)** — StoredSample/StoredCursor wrapping SyncCursor.
 - [x] **XCTest suite** runs under Xcode: 23 tests, 0 failures.
 - [ ] Port **per-metric parsers** (blocked: metric formats 🔴 in PROTOCOL.md §5).
-- [ ] Run on a real device + ring (BLE needs hardware; simulator can't connect).
+- [x] Run on a real device + ring (BLE needs hardware; simulator can't connect) —
+      the app runs on an iPhone.
 **Exit:** iOS app pulls the same data the desktop client does.
 
 > **Blocked on hardware/decisions (hard stops):** (a) notify/write **characteristic

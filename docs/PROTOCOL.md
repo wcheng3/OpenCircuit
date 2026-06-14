@@ -156,11 +156,22 @@ in the HR-only capture). First sample is a warm-up sentinel (byte[2] ≈ 8); tre
 Page: `[0]`=`0x47` · `[1]`=`00` · **`[2]`=remaining-RECORD countdown** (−5/full page,
 0 on last; e.g. `1c 17 12 0d 08 03 00`) · body = N×**47-byte records** · `[last]`=XOR
 (valid 11/11). 🟢
-Record (47 B): `[0]`=`0x0c` · `[1:4]`=BE counter **+0x0384/rec** (cursor space) 🟢 ·
-`[4:6]`=16-bit field drifting with baseline 🟡 · `[6:9]`=usually `00 00 00`, else
-per-record flag/event 🟡 · `[9:47]`=**38 B ≈ 30 samples × 10-bit BE** (self-consistent
-but unproven; 10-vs-12-bit ambiguous) 🟡. Waveform is flat/settling when idle,
-oscillatory (pulsatile-like) when worn — not globally monotonic.
+Record (47 B): `[0]`=`0x0c` · `[1:4]`=BE counter **+0x0384/rec = 900 s** (cursor space) 🟢 ·
+`[4:6]`=16-bit baseline (`[4]`=`02` const, `[5]` drifts) 🟡 · `[6:9]`=usually `00 00 00`,
+else per-record flag/event 🟡 · `[9:47]`=**38 B = 30 × 10-bit big-endian samples**
+(300 bits + 4 zero pad-bits) 🟢.
+
+**Bit-width resolved (10-bit), 2026-06-13 capture.** Decoding `[9:47]` as 10-bit BE
+gives the lowest sample-to-sample jitter of all widths (0.32 vs 0.39–0.42 for 8/12/16)
+and clean pulsatile waveforms on worn records (counter `0c22…`). The 30 samples are
+**two interleaved channels × 15** (even/odd): splitting them lowers jitter further
+(0.13–0.15) and the two tracks are near-identical (e.g. `553/553 → 629/623 → 646/647`)
+— consistent with **red + IR PPG** (the pair SpO2's ratio-of-ratios needs; SpO2 itself
+lands in `0x4c[8]`, §5.3). 🟢
+Cadence: ~80 records span 20 days (very **sparse** — occasional optical snapshots, not a
+continuous trace); 30 samples per 900 s record ≈ 1/channel/min, so this is a
+perfusion/amplitude trend, not pulse-resolution waveform 🟡. Reproduce with
+`desktop/decode_ppg.py`.
 
 ### 5.3 `0x4c` — bulk activity/sleep page (ACK each with `cc 00 00`)
 Page: `[0]`=`0x4c` · `[1]`=`00` · **`[2]`=remaining-RECORD countdown** (−6/page) ·
@@ -195,8 +206,14 @@ time (no 12 h offset in this capture; bears on §5.6/§6.6). Reassemble + decode
   matching the app's "lowest 93 % around 2:30–3 am" — the decisive temporal anchor.
 - `[6]` (1–10, ~9) and `[7]` (~120) unresolved 🟡 — candidate signal-quality / pulse
   amplitude. `[9]`≈`0x0a` and `[22]` (low-nibble `4`, high-nibble varies) flags 🟡.
-- **Respiratory rate (15 bpm) and skin temp (35.88 °C) are NOT in the per-epoch record**
-  — no byte matches; they are derived/summary values (separate frame or app-computed) 🔴.
+- **Respiratory rate (15 bpm) and skin temp (35.88 °C) are NOT in ANY frame this
+  sync captured** 🔴 — checked every byte and 16-bit field of the `0x4c`/`0x47`/`0x10`/
+  `0x87`/`0x81`/`0x15` frames: no stable `0x0f` (RR) and no temp-scaled value (`358`/`359`
+  = 0.1 °C, `3588` = 0.01 °C, `966`/`9658` = °F all absent). RR is most likely **app-derived**
+  (from PPG/HRV — respiratory sinus arrhythmia); skin temp is a real sensor reading, so it
+  is probably fetched by a **command this capture never issued** (candidate: the 🔴
+  secondary service `0x0900`, §1) or lives in a daily-summary record we haven't pulled.
+  A capture that opens the app's temperature screen / triggers a temp refresh is needed.
 
 **`[10:15]` = 5× per-30 s motion/activity counts** 🟢(role)/🟡(unit). Over a real night
 they decay from `~14 15 15 14` (≈20, awake/settling at 23:09) to the `01 01 01 01 01`
