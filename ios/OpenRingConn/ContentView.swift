@@ -23,6 +23,8 @@ struct ContentView: View {
 
                 Section("Actions") {
                     Button("Scan & connect") { scanner.start() }
+                    Button("Start live HR") { scanner.session?.startLiveHR() }
+                        .disabled(scanner.session?.ready != true)
                     Button("Poll live HR") { scanner.session?.pollLiveHR() }
                         .disabled(scanner.session?.ready != true)
                     Button(healthAuthorized ? "Health authorized" : "Authorize Apple Health") {

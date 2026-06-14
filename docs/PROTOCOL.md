@@ -69,36 +69,58 @@ challenge, no key derived from MAC/serial. History sync uses the same channel as
 live data with no extra auth. (Re-verify on a *fresh pair* capture to be certain a
 one-time bonding step isn't being skipped on an already-bonded phone.)
 
-## 3. Framing 🟢
+## 3. Framing 🟢 (verified live on the Mac)
 
-```
-[cmd][len][payload…][xor]
-```
-- **cmd** — 1-byte command id (TX) / response id (RX).
-- **Response id = command id XOR 0x80.** Reproduced across 8 commands:
-  `01→81 · 02→82 · 06→86 · 07→87 · 95→15 · c7→47 · cc→4c · d0→50`.
-- **xor trailer** — XOR of all preceding bytes. Validates on 86/88 RX frames and on
-  the legacy `95 00 95` keepalive. (Two `0x50` status frames lack it — see §5.)
-- **len** — 2nd byte; small count/sub-id. Exact semantics per command still 🟡.
+**Commands and responses use DIFFERENT trailers — this corrects an earlier error.**
 
-Bulk history frames (`0x47`/`0x4c`) pack multiple fixed-size records, each prefixed
-`0c 09 <counter>` where the counter increments ~0x0384 per record (sample index).
+**Responses (RX, ring → host):** `[respid][payload…][xor]`
+- **respid = command id XOR 0x80**: `01→81 · 02→82 · 06→86 · 07→87 · 95→15 · c7→47 · cc→4c · d0→50` (10 cmds reproduced).
+- **xor trailer** = XOR of all preceding bytes. Validates on 86/88 RX frames. (The two `0x50` status frames lack it — see §5.)
 
-## 4. Commands (request → response)
+**Commands (TX, host → ring):** `[cmd][sub][payload…][00]` — **NOT checksummed.**
+- Sent **verbatim**; the last byte is a literal `0x00`, not an XOR. ⚠️ The GB #4506
+  keepalive `95 00 95` is **wrong**; the real command is `95 00 00`. Building command
+  frames by appending an XOR trailer produces invalid bytes the ring ignores.
+- The ring ATT-acks any write but only *acts* on commands whose contents are valid.
 
-| Command | Write (hex) | Resp id | Role | Conf. |
+Bulk frames (`0x47`/`0x4c`) pack fixed-size records prefixed `0c 09 <counter>`
+(counter += ~0x0384/record). The page is continued by ACKing: a `0x47` page →
+write `c7 00 00`; a `0x4c` page → write `cc 00 00`; the last page carries
+remaining-count byte `0x00`.
+
+## 4. Commands (request → response) 🟢
+
+| Command | Write (hex) | Resp | Role | Conf. |
 |---|---|---|---|---|
-| Poll / keepalive | `95 00 00` (≡ legacy `95 00 95`) | `0x15` | live sample stream | 🟢 |
-| Fetch next record | `07 00 00` | `0x87` | history record header | 🟢 |
-| Page ACK / continue | `c7 00 00` / `cc 00 00` | `0x47`/`0x4c` | bulk PPG/waveform pages | 🟢 |
-| Session setup | `01 00 00`, `01 01 …` | `0x81` | metadata/record table | 🟢 |
-| Setup w/ 4-byte arg | `02 00 0c 22 98 c3 00 01 00` | `0x82` | arg `0c 22 98 c3` = ? (time/cursor) | 🟡 |
-| Sub-select | `06 01 00` / `06 02 00` | `0x86` | selects record group | 🟡 |
-| Status query | `d0 00 00` | `0x10`/`0x50` | session/record status | 🟡 |
-| Set time | TBD | — | — | 🔴 |
+| Status read | `01 00 00` | `81 00 ..` | works unauthenticated; only cmd that replies cold | 🟢 |
+| Status read 2 | `01 01 31 82 67 00` | `81 01 ..` (38B) | record/config table | 🟢 |
+| **Sync open** | `02 00 <cursor:4> 00 01 00` | `82 ..` | opens data session; **cursor, not wall-clock** | 🟢 |
+| Fetch / stream | `07 00 00` | `87`/`15`/`47`/`4c` | pulls next data per current mode | 🟢 |
+| Live-HR mode | `06 01 00` | `86 00 86` | switch session to live HR | 🟢 |
+| Poll | `95 00 00` | `15 ..` | one live sample per poll | 🟢 |
+| Page ACK | `c7 00 00` / `cc 00 00` | `47`/`4c` | continue bulk transfer | 🟢 |
+| Status query | `d0 00 00` | `10`/`50` | session/record status | 🟡 |
 
-Metric-specific sync commands (sleep/HRV/SpO2/steps/temp) not yet isolated — the
-reference capture is a live HR + history-download session only.
+**The `02` arg is a sync CURSOR, not a timestamp** (🟢, this was the key unlock).
+Real-time values are *rejected* (no `82`); only a cursor **≥ the ring's last-synced
+position** is accepted. `02 00 FF FF FF FF 00 01 00` (max) always works and means
+"sync everything". The capture's `0c 22 98 c3` was the app's then-current cursor;
+replaying it now fails because the ring has since advanced past it.
+
+**Verified live-HR sequence (from the Mac, `desktop/livehr.py`):**
+```
+01 00 00                  -> 81 ..        (wake/status)
+01 01 31 82 67 00         -> 81 01 ..     (config table)
+02 00 FF FF FF FF 00 01 00 -> 82 ..       (open sync, cursor=all)
+07 00 00 + c7/cc acks     -> 87,47,4c ..  (drain any history backlog)
+06 01 00                  -> 86 00 86     (enter live-HR mode)
+07 00 00                  -> 15 ..        (first live sample)
+95 00 00  (repeat)        -> 15 00 <hr> 0a b0 <xor>   (one HR sample per poll)
+```
+Caveats (🟡): live `15` frames require the ring **worn with good skin contact** and
+a few seconds of PPG warm-up; and the ring sleeps/stops advertising seconds after
+disconnect (wake via charger contact or motion). Metric-specific sync commands
+(sleep/HRV/SpO2/steps/temp) not yet isolated.
 
 ## 5. Decoded metric formats
 

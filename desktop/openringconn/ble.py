@@ -36,9 +36,15 @@ CMD_FETCH_RECORD = 0x07  # next history record header  -> 0x87
 CMD_PAGE_47 = 0xC7       # page ACK / continue bulk    -> 0x47
 CMD_PAGE_4C = 0xCC       # page ACK / continue bulk    -> 0x4C
 
-# The live poll/keepalive the official app writes (🟢). `95 00 95` and `95 00 00`
-# are the same command + XOR trailer (see framing.xor_trailer).
-KEEPALIVE_PAYLOAD = bytes.fromhex("950095")
+# The live poll the official app writes between samples (🟢, from capture).
+# NOTE: commands are NOT XOR-checksummed (unlike responses) — the real bytes are
+# `95 00 00`, not the GB #4506-guessed `95 00 95`. Each poll yields one 0x15 frame.
+KEEPALIVE_PAYLOAD = bytes.fromhex("950000")
+
+# Exact command sequence the app sends to start the live-HR stream (🟢, capture
+# idx 224-229): set live-HR mode, then begin streaming. Poll with KEEPALIVE_PAYLOAD
+# afterwards. Sent verbatim — do not append a checksum.
+LIVE_HR_START_SEQ = [bytes.fromhex("060100"), bytes.fromhex("070000")]
 
 # Name prefixes to match while scanning (🟢 — observed "RingConn Gen2-<MAC suffix>").
 NAME_PREFIXES = ("RingConn", "Ring")

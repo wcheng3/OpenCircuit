@@ -33,13 +33,20 @@ final class RingSession: NSObject {
         peripheral.discoverServices(nil)
     }
 
-    /// Send the live-HR poll / keepalive (0x95). Codec builds `95 00 95`.
+    /// Enter live-HR mode: status → open sync (cursor=all) → live mode → fetch.
+    /// History backlog (47/4c pages) is drained by acking in didUpdateValue.
+    func startLiveHR() {
+        for cmd in Command.liveHRStart { write(cmd) }
+    }
+
+    /// Poll for one live sample (0x95 → 0x15). Sent verbatim — NOT XOR-encoded.
     func pollLiveHR() {
-        write(Frame.encode(Opcode.poll, [0x00]))
+        write(Command.poll)
     }
 
     private func write(_ bytes: [UInt8]) {
         guard let writeChar else { return }
+        // Write char advertises `write` (with response).
         peripheral.writeValue(Data(bytes), for: writeChar, type: .withResponse)
     }
 }
@@ -74,8 +81,14 @@ extension RingSession: CBPeripheralDelegate {
         let bytes = [UInt8](data)
         Task { @MainActor in
             self.lastFrame = data.map { String(format: "%02x", $0) }.joined(separator: " ")
-            guard let frame = Frame.parse(bytes) else { return }   // XOR-validate
-            // Response id = command id XOR 0x80. 0x15 is the live-sample stream.
+            // Bulk history pages: ack to continue draining (47→c7, 4c→cc).
+            switch bytes.first {
+            case 0x47: self.write(Command.pageAck47); return
+            case 0x4C: self.write(Command.pageAck4C); return
+            default: break
+            }
+            guard let frame = Frame.parse(bytes) else { return }   // XOR-validate responses
+            // 0x15 is the live-sample stream (resp of 0x95 poll).
             if frame.opcode == Frame.responseID(Opcode.poll) {
                 self.liveHR = LiveHR.decode(bytes)   // 🟡 offset tentative
             }

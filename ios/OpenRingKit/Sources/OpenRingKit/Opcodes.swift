@@ -14,9 +14,28 @@ public enum Opcode {
 
     // Session setup / metadata (roles partly 🟡 — see PROTOCOL.md §4).
     public static let sessionSetup: UInt8 = 0x01
-    public static let setupWithArg: UInt8 = 0x02
-    public static let subSelect: UInt8 = 0x06
+    public static let syncOpen: UInt8 = 0x02
+    public static let liveHRMode: UInt8 = 0x06
     public static let statusQuery: UInt8 = 0xD0
+}
+
+/// Exact command byte sequences, sent VERBATIM (🟢 verified live, PROTOCOL.md §3).
+/// Commands are NOT XOR-checksummed — they end in a literal 0x00. Do not build
+/// them with Frame.xorTrailer; that produces invalid frames the ring ignores
+/// (e.g. the GB #4506 `95 00 95` is wrong — the real poll is `95 00 00`).
+public enum Command {
+    public static let status0: [UInt8] = [0x01, 0x00, 0x00]
+    public static let status1: [UInt8] = [0x01, 0x01, 0x31, 0x82, 0x67, 0x00]
+    /// Open the data session. Cursor 0xFFFFFFFF = "sync everything" (always accepted).
+    public static let syncAll: [UInt8] = [0x02, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01, 0x00]
+    public static let liveHRMode: [UInt8] = [0x06, 0x01, 0x00]
+    public static let fetch: [UInt8] = [0x07, 0x00, 0x00]
+    public static let poll: [UInt8] = [0x95, 0x00, 0x00]
+    public static let pageAck47: [UInt8] = [0xC7, 0x00, 0x00]
+    public static let pageAck4C: [UInt8] = [0xCC, 0x00, 0x00]
+
+    /// Steps to enter live-HR mode, in order (drain history between fetch/acks).
+    public static let liveHRStart: [[UInt8]] = [status0, status1, syncAll, liveHRMode, fetch]
 }
 
 /// BLE transport handles (🟢). The ring is driven through this pair, not discrete

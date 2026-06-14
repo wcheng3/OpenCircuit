@@ -22,10 +22,16 @@ final class FrameTests: XCTestCase {
         "104e0100000000fd00fd00000000100c0bffb7",
     ]
 
-    func testXorTrailerMatchesKeepalive() {
-        // The app's live poll / keepalive: 95 00 95.
-        XCTAssertEqual(Frame.xorTrailer([0x95, 0x00]), 0x95)
-        XCTAssertEqual(Frame.encode(0x95, [0x00]), [0x95, 0x00, 0x95])
+    func testXorTrailerValidatesResponses() {
+        // XOR trailer applies to RESPONSES: 81^00^b0 = 31.
+        XCTAssertEqual(Frame.xorTrailer([0x81, 0x00, 0xB0]), 0x31)
+    }
+
+    func testCommandsAreVerbatimNotChecksummed() {
+        // The real poll is 95 00 00 (NOT the GB-guessed XOR'd 95 00 95).
+        XCTAssertEqual(Command.poll, [0x95, 0x00, 0x00])
+        XCTAssertNotEqual(Command.poll.last, Frame.xorTrailer([0x95, 0x00]))
+        XCTAssertEqual(Command.syncAll, [0x02, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01, 0x00])
     }
 
     func testRealFramesValidate() {
@@ -59,12 +65,11 @@ final class FrameTests: XCTestCase {
         XCTAssertEqual(p, Frame.Parsed(opcode: 0x81, body: [0x00, 0xB0], trailer: 0x31))
     }
 
-    func testEncodeRoundTrips() {
-        for opcode: UInt8 in [0x01, 0x07, 0x95, 0xCC] {
-            let frame = Frame.encode(opcode, [0x00, 0x00])
-            XCTAssertTrue(Frame.isValid(frame))
-            XCTAssertEqual(Frame.parse(frame)?.opcode, opcode)
-        }
+    func testLiveHRStartSequenceShape() {
+        // Verified live order: status, status1, syncAll, liveHRMode, fetch.
+        XCTAssertEqual(Command.liveHRStart.first, [0x01, 0x00, 0x00])
+        XCTAssertEqual(Command.liveHRStart.last, [0x07, 0x00, 0x00])
+        XCTAssertTrue(Command.liveHRStart.contains(Command.syncAll))
     }
 
     func testLiveHRDecode() {

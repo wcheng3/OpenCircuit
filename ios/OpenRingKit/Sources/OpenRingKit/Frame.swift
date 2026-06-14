@@ -35,13 +35,10 @@ public enum Frame {
     public static let responseFlag: UInt8 = 0x80
     public static func responseID(_ cmd: UInt8) -> UInt8 { cmd ^ responseFlag }
 
-    /// Build a command frame: `[opcode] + body + [xor]`.
-    /// e.g. `encode(0x95, [0x00])` → `95 00 95` (the live poll / keepalive).
-    public static func encode(_ opcode: UInt8, _ body: [UInt8] = []) -> [UInt8] {
-        var frame = [opcode] + body
-        frame.append(xorTrailer(frame))
-        return frame
-    }
+    // NOTE: there is intentionally NO command-encoder here. Commands are NOT
+    // XOR-checksummed (verified live, PROTOCOL.md §3) — they are sent verbatim from
+    // the literal byte arrays in `Command`. The XOR trailer applies to RESPONSES
+    // only (use isValid/parse to verify and split incoming frames).
 
     /// A parsed frame: opcode, body (bytes between opcode and trailer), trailer.
     /// Returns nil if the XOR trailer doesn't validate.

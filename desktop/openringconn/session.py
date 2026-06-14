@@ -86,25 +86,41 @@ def _make_handler(label: str):
 
 
 async def listen(address: str, notify_char: str = ble.NOTIFY_CHAR,
-                 keepalive: bool = False, duration: float | None = None) -> None:
+                 keepalive: bool = False, duration: float | None = None,
+                 start_hr: bool = False, sends: list[str] | None = None) -> None:
     """Subscribe to the notify characteristic and log every payload as hex.
 
-    With --keepalive, periodically writes the observed live-HR keepalive so the
-    ring keeps streaming (useful while decoding heart rate).
+    --send HEX (repeatable) writes arbitrary command frames verbatim after
+    subscribing (commands are NOT checksummed — bytes are sent as-is).
+    --start-hr is a shortcut for the live-HR start sequence (06 01 00, 07 00 00).
+    --keepalive then polls (95 00 00) every second so the ring keeps emitting
+    0x15 live samples (byte[2] = HR).
     """
+    # Build the on-connect write sequence.
+    frames: list[bytes] = [bytes.fromhex(h.replace(" ", "")) for h in (sends or [])]
+    if start_hr:
+        frames += ble.LIVE_HR_START_SEQ
+
     device = await _resolve(address)
     print(f"Connecting to {address} …")
     async with BleakClient(device) as client:
         print(f"Connected. Subscribing to {notify_char}. Ctrl-C to stop.\n")
         await client.start_notify(notify_char, _make_handler("notify"))
 
+        for cmd in frames:
+            print(f"  -> send {cmd.hex(' ')}")
+            with contextlib.suppress(Exception):
+                await client.write_gatt_char(ble.WRITE_CHAR, cmd, response=True)
+            await asyncio.sleep(0.4)
+
         async def keepalive_loop():
             while True:
                 with contextlib.suppress(Exception):
+                    # Write char advertises `write` (not write-no-response) -> response=True.
                     await client.write_gatt_char(
-                        ble.WRITE_CHAR, ble.KEEPALIVE_PAYLOAD, response=False
+                        ble.WRITE_CHAR, ble.KEEPALIVE_PAYLOAD, response=True
                     )
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
 
         tasks = []
         if keepalive:

@@ -29,8 +29,9 @@ let realFrames = [
 
 print("RingKitVerify — RingConn codec self-checks")
 
-check(Frame.xorTrailer([0x95, 0x00]) == 0x95, "keepalive XOR 95 00 -> 95")
-check(Frame.encode(0x95, [0x00]) == [0x95, 0x00, 0x95], "encode poll -> 95 00 95")
+check(Frame.xorTrailer([0x81, 0x00, 0xB0]) == 0x31, "response XOR trailer 81 00 b0 -> 31")
+check(Command.poll == [0x95, 0x00, 0x00], "poll command is verbatim 95 00 00 (not XOR'd)")
+check(Array(Command.syncAll[2...5]) == [0xFF, 0xFF, 0xFF, 0xFF], "syncAll cursor = 0xFFFFFFFF")
 for f in realFrames { check(Frame.isValid(hex(f)), "real frame validates: \(f)") }
 
 var bad = hex("8100b031"); bad[1] ^= 0xFF
