@@ -66,6 +66,10 @@ Validate the spec cheaply before committing to Swift.
 > Dedup *logic* is unit-tested via `SyncCursor`; the `LocalStore` SwiftData wrapper is
 > build-verified only (no app-target test target yet). Live-HR samples aren't persisted
 > (only history sync routes through the store). Functional run needs device + ring.
+> **The only blocker to actually writing Health is the HealthKit entitlement, which needs
+> a paid Apple Developer account.** Enable on a paid team with one command —
+> `HEALTHKIT_ENTITLEMENTS=OpenRingConn/OpenRingConn.entitlements xcodegen generate` — then
+> set your team (see HANDOFF). Free-team builds keep working (entitlement empty, auth no-ops).
 **Exit:** ring metrics appear in Apple Health, no cloud involved.
 
 ## Phase 5 — Analytics (port from openwhoop)

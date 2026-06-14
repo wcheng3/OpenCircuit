@@ -50,14 +50,37 @@ CoreBluetooth notes:
 - Background BLE sync needs the `bluetooth-central` background mode + state
   restoration if you want sync while the app is suspended.
 
-## HealthKit (Phase 4)
-- Add HealthKit capability; set `NSHealthShareUsageDescription` and
-  `NSHealthUpdateUsageDescription` in Info.plist.
-- Request write auth per type, then save samples with the **device's own
-  timestamps** so history backfills correctly. Dedup via the per-metric sync cursor
-  + a stable bundle id. Full type table: `docs/HEALTHKIT_MAPPING.md`.
-- Gotchas already noted there: HealthKit stores **SDNN** (not RMSSD); sleep is many
-  per-stage `sleepAnalysis` category samples, not one record.
+## HealthKit (Phase 4) — already built; gated on a paid account
+
+The write path is complete: `HealthKitWriter` (auth + per-type units), `LocalStore`
+(cursor dedup, backfill/incremental), `BulkSleep.samples`/`sleepSegments`, wired in
+`RingSession` + `ContentView`. Info.plist already has the `NSHealth*UsageDescription`
+strings. The **only** missing piece is the HealthKit entitlement, which **requires a
+paid Apple Developer Program membership** — a free personal team cannot provision it
+(the app still builds/runs on a free team, but HealthKit auth no-ops at runtime).
+
+### Turn it on when you have the paid account
+1. Join the Apple Developer Program ($99/yr); add your Apple ID to Xcode.
+2. Generate the project WITH the entitlement (one command, no YAML edit):
+   ```
+   cd ios
+   HEALTHKIT_ENTITLEMENTS=OpenRingConn/OpenRingConn.entitlements xcodegen generate
+   ```
+   (Unset = free-team default, no entitlement. The flag bakes
+   `OpenRingConn/OpenRingConn.entitlements` — which sets `com.apple.developer.healthkit` —
+   into `CODE_SIGN_ENTITLEMENTS`.)
+3. Open `OpenRingConn.xcodeproj` → OpenRingConn target → Signing & Capabilities → pick
+   your **Team** (sets `DEVELOPMENT_TEAM`). Automatic signing registers the App ID
+   `com.openringconn.app` and enables the HealthKit capability for it.
+4. Build+run on the iPhone. In the app: **Authorize Apple Health** (grant all types) →
+   **Sync history** → **Write to Apple Health**.
+5. Open **Bevel** — it reads HR / HRV / SpO2 / sleep from Apple Health.
+
+Notes: HealthKit stores **SDNN** (we write the ring's RMSSD value there — that's the
+number Bevel shows). Sleep is many per-stage `sleepAnalysis` category samples. The
+experimental Deep/REM staging is display-only and NOT written to Health (only the coarse
+inBed/asleep/awake segments are). Skin temp is unresolved (cloud-derived; issue #12).
+Full type table: `docs/HEALTHKIT_MAPPING.md`.
 
 ## Definition of done per phase
 See `docs/ROADMAP.md` "Exit" lines. Phase 3 exit: the iOS app pulls the same data
