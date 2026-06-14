@@ -111,5 +111,32 @@ check(SleepScore.score(durationSeconds: 8 * 3600) == 100.0, "8h sleep -> 100")
 check(SleepScore.score(durationSeconds: 4 * 3600) == 0.0, "4h sleep -> 0 (integer ratio)")
 check(SleepScore.score(durationSeconds: 24 * 3600) == 100.0, "24h sleep -> clamped 100")
 
+// Sleep detection (activity.rs)
+let base = Date(timeIntervalSince1970: 1_700_000_000)
+func reading(_ minutes: Int, _ g: SIMD3<Float>?) -> GravitySample {
+    GravitySample(time: base.addingTimeInterval(Double(minutes) * 60), gravity: g)
+}
+check(ActivityPeriod.detectFromGravity([]).isEmpty, "detect: empty -> none")
+check(ActivityPeriod.detectFromGravity([reading(0, SIMD3(0, 0, 1))]).isEmpty, "detect: single -> none")
+let still = (0..<120).map { reading($0, SIMD3(0, 0, 1)) }
+check(ActivityPeriod.detectFromGravity(still).first?.activity == .sleep, "detect: all-still -> sleep")
+let moving = (0..<120).map { reading($0, SIMD3($0 % 2 == 0 ? 1 : -1, 0, 0)) }
+check(ActivityPeriod.detectFromGravity(moving).first?.activity == .active, "detect: all-moving -> active")
+let noGrav = (0..<120).map { reading($0, nil) }
+check(ActivityPeriod.detectFromGravity(noGrav).first?.activity == .active, "detect: no-gravity -> active")
+var gapped = (0..<60).map { reading($0, SIMD3(0, 0, 1)) }
+gapped += (120..<180).map { reading($0, SIMD3(0, 0, 1)) }
+check(ActivityPeriod.detectFromGravity(gapped).count >= 2, "detect: >20min gap breaks run")
+
+var events = [
+    ActivityPeriod(activity: .active, start: base, end: base.addingTimeInterval(30 * 60)),
+    ActivityPeriod(activity: .sleep, start: base.addingTimeInterval(30 * 60), end: base.addingTimeInterval(300 * 60)),
+]
+check(ActivityPeriod.findSleep(&events)?.activity == .sleep, "findSleep: returns long sleep")
+var shortSleep = [ActivityPeriod(activity: .sleep, start: base, end: base.addingTimeInterval(30 * 60))]
+check(ActivityPeriod.findSleep(&shortSleep) == nil, "findSleep: ignores <60min sleep")
+var none: [ActivityPeriod] = []
+check(ActivityPeriod.findSleep(&none) == nil, "findSleep: empty -> nil")
+
 print(failures == 0 ? "\nALL CHECKS PASSED" : "\n\(failures) CHECK(S) FAILED")
 exit(failures == 0 ? 0 : 1)

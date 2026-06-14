@@ -58,8 +58,11 @@ Validate the spec cheaply before committing to Swift.
       and **sleep score** to Swift in `OpenRingKit/Analytics/`, with tests mirroring
       openwhoop's own Rust vectors (exact calibration anchors match: strain 21.0 at
       24h@maxHR, stress 10.0 at constant RR).
-- [ ] Port **sleep-cycle detection** (activity.rs ActivityPeriod + sleep staging) —
-      device-agnostic algorithm; defer until we confirm the ring's HR/RR/IMU stream.
+- [x] Port **sleep-cycle detection** (activity.rs: gravity-vector stillness →
+      Sleep/Active periods, `findSleep`) to `Analytics/SleepDetection.swift`, with
+      tests mirroring openwhoop's. ⚠️ needs a per-reading **gravity vector** — the
+      ring's IMU stream is 🔴 (likely the 0x47/0x4c bulk frames), so it's algorithm-
+      ready but not yet wired to real data.
 - [ ] Wire analytics to real decoded metrics (blocked: RR-interval availability &
       sample cadence are 🔴 in PROTOCOL.md §5 — needs a capture).
 - [ ] Write derived metrics to HealthKit / app UI (Phase 4 dependency).
