@@ -27,7 +27,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
         let operation = Task { @MainActor in
             do {
-                let container = try ModelContainer(for: StoredSample.self, StoredCursor.self)
+                let container = OpenRingConnApp.makeContainer()
                 let service = RingBackgroundSyncService(
                     store: LocalStore(container.mainContext),
                     health: HealthKitWriter()
