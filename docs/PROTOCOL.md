@@ -288,6 +288,25 @@ Baseline `01` = "still", not "unworn".
 > 🟢 (app-aligned, §6.2). Open: `[6]`/`[7]` semantics, the activity-epoch `[15:22]` payload,
 > and skin temp + RR (not in this capture — see above).
 
+> **2026-06-15 first-morning sync, ground-truthed (`captures/morning_temp_20260615`).**
+> Captured the official app's first sync of the day via `adb bugreport`. App readout for the
+> 2026-06-14 night (ground truth): asleep **7:37**, in bed **9:33**, efficiency **80 %**,
+> awake **43 m**, REM **1:42**, light **4:45**, deep **1:10**, temp avg **96.40 °F**
+> (35.78 °C), baseline **96.73 °F** (35.96 °C), deviation **−0.32 °F**, RR **15.1 bpm**.
+> - **Temp + RR still absent from the wire**, now tested against the *exact* ground-truth
+>   values: searched every frame/handle for 96.40/96.73 °F and 35.78/35.96 °C in ×1/×10/×100
+>   (both scales) and RR 15.1 (`00 97`/`0f`) → **0 genuine matches**. A per-byte and BE-16
+>   scan of all 190 `0x4c` epochs found **no temp-like field** (`byte[1]=0x24` is just the
+>   counter high byte). So temp/RR are not in the passive activity/sleep/PPG drain. 🔴
+> - **New frames this capture:** opcode **`0x91`** (app→ring, `91 00 00`) ACKs a ring-pushed
+>   notification **`0x11`** (`11 00 0N 55`, N increments) — an event-counter handshake, no
+>   payload. `0x0805` carries only `01 00` control writes. Neither is temp.
+> - Ring owner confirms **temp does come over BLE** → it rides a command/flag the normal
+>   sync never sends (prime suspect: untried sync-open flag `02 00 <cursor> 01|02|04 01 00`),
+>   or a separate fetch outside the snoop ring-buffer window. **Resolved only by active
+>   probing** (in progress). HR/HRV/SpO2 decode re-confirmed (sleep window low-HR 48–58 bpm,
+>   SpO2 dip to 89 %). Sleep stages remain app-computed (no stage byte) — Phase-5 classifier.
+
 ### 5.4 `0x10` / `0x87` — fixed 19-byte descriptor
 `0x10` ← `d0 00 00` (also spontaneous ~30–60 s); `0x87` ← `07 00 00`. **Identical
 layout** (only `[0]` respid differs; `0x87` body == `0x10` body) → shared descriptor,
