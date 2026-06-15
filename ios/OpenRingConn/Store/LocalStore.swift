@@ -212,6 +212,7 @@ struct LocalStore {
 struct LaunchSnapshot {
     let lastHeartRate: QuantitySample?
 
+    @MainActor
     static func load(from store: LocalStore) throws -> LaunchSnapshot {
         LaunchSnapshot(lastHeartRate: try store.latestSample(kind: .heartRate))
     }
