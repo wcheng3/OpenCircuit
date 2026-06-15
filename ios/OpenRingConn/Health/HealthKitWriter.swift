@@ -48,6 +48,7 @@ final class HealthKitWriter {
         for k in MetricKind.allCases {
             if let t = Self.quantityType(for: k) { set.insert(t) }
         }
+        set.insert(HKQuantityType(.basalEnergyBurned))
         set.insert(HKCategoryType(.sleepAnalysis))
         return set
     }
@@ -65,6 +66,40 @@ final class HealthKitWriter {
         }
         guard !hkSamples.isEmpty else { return }
         try await store.save(hkSamples)
+    }
+
+    func writePassiveCalories(profile: UserProfile, date: Date) async throws {
+        let type = HKQuantityType(.basalEnergyBurned)
+        let quantity = HKQuantity(
+            unit: .kilocalorie(),
+            doubleValue: Calories.bmrKcalPerHour(profile: profile)
+        )
+        let sample = HKQuantitySample(
+            type: type,
+            quantity: quantity,
+            start: date,
+            end: date.addingTimeInterval(3600)
+        )
+        try await store.save(sample)
+    }
+
+    func writeActiveCalories(kcal: Double, date: Date) async throws {
+        guard kcal > 0 else { return }
+        let type = HKQuantityType(.activeEnergyBurned)
+        let quantity = HKQuantity(unit: .kilocalorie(), doubleValue: kcal)
+        let sample = HKQuantitySample(
+            type: type,
+            quantity: quantity,
+            start: date,
+            end: date.addingTimeInterval(3600)
+        )
+        try await store.save(sample)
+    }
+
+    func writeActiveCalories(hrSamples: [HRSample], profile: UserProfile, date: Date) async throws {
+        let maxHR = max(220 - profile.age, 1)
+        let kcal = Calories.activeKcal(hrSamples: hrSamples, maxHR: maxHR)
+        try await writeActiveCalories(kcal: kcal, date: date)
     }
 
     /// Write a night as contiguous sleepAnalysis category samples (mapping notes).

@@ -138,6 +138,22 @@ check(strain.calculate(bpms: Array(repeating: 80, count: 500)) == nil, "too few 
 check(Strain(maxHR: 60, restingHR: 60).calculate(bpms: Array(repeating: 80, count: 600)) == nil,
       "maxHR<=restingHR -> nil")
 
+// Calories (Mifflin-St Jeor BMR + Edwards TRIMP kcal)
+let maleProfile = UserProfile(age: 30, weightKg: 80, heightCm: 180, sex: .male)
+check(Calories.bmrKcalPerDay(profile: maleProfile) == 1780.0, "male BMR Mifflin-St Jeor")
+check(abs(Calories.bmrKcalPerHour(profile: maleProfile) - 74.166_666) < 0.001, "male BMR hourly")
+let femaleProfile = UserProfile(age: 40, weightKg: 65, heightCm: 165, sex: .female)
+check(Calories.bmrKcalPerDay(profile: femaleProfile) == 1320.25, "female BMR Mifflin-St Jeor")
+let hrStart = Date(timeIntervalSince1970: 0)
+let calorieSamples = (0..<600).map { offset in
+    HRSample(
+        bpm: 150,
+        start: hrStart.addingTimeInterval(Double(offset)),
+        end: hrStart.addingTimeInterval(Double(offset + 1))
+    )
+}
+check(abs(Calories.activeKcal(hrSamples: calorieSamples, maxHR: 180) - 150.0) < 0.001, "TRIMP 30 -> 150 kcal")
+
 // Sleep score (integer-ratio model, faithful to openwhoop)
 check(SleepScore.score(durationSeconds: 8 * 3600) == 100.0, "8h sleep -> 100")
 check(SleepScore.score(durationSeconds: 4 * 3600) == 0.0, "4h sleep -> 0 (integer ratio)")

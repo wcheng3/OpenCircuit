@@ -39,13 +39,43 @@ public struct Strain: Sendable {
     /// Strain for a BPM series sampled every `sampleSeconds`. nil if too few
     /// readings or maxHR ≤ restingHR. Mirrors `StrainCalculator::calculate`.
     public func calculate(bpms: [Int], sampleSeconds: Double = 1.0) -> Double? {
-        guard bpms.count >= Self.minReadings, maxHR > restingHR else { return nil }
+        guard let trimp = Self.edwardsTRIMP(
+            bpms: bpms,
+            maxHR: maxHR,
+            restingHR: restingHR,
+            sampleSeconds: sampleSeconds
+        ) else { return nil }
+        return Self.trimpToStrain(trimp)
+    }
+
+    /// Raw Edwards zone-weighted TRIMP for a BPM series.
+    public static func edwardsTRIMP(
+        bpms: [Int],
+        maxHR: Int,
+        restingHR: Int,
+        sampleSeconds: Double = 1.0
+    ) -> Double? {
+        guard bpms.count >= minReadings, maxHR > restingHR else { return nil }
         let hrReserve = Double(maxHR) - Double(restingHR)
         let sampleMin = sampleSeconds <= 0 ? 1.0 / 60.0 : sampleSeconds / 60.0
-        let trimp = bpms.reduce(0.0) { acc, bpm in
-            acc + sampleMin * Double(Self.zoneWeight(bpm: bpm, restingHR: restingHR, hrReserve: hrReserve))
+        return bpms.reduce(0.0) { acc, bpm in
+            acc + sampleMin * Double(zoneWeight(bpm: bpm, restingHR: restingHR, hrReserve: hrReserve))
         }
-        return Self.trimpToStrain(trimp)
+    }
+
+    /// Raw Edwards zone-weighted TRIMP for timestamped HR samples.
+    public static func edwardsTRIMP(hrSamples: [HRSample], maxHR: Int, restingHR: Int) -> Double? {
+        guard hrSamples.count >= minReadings, maxHR > restingHR else { return nil }
+        let hrReserve = Double(maxHR) - Double(restingHR)
+        return hrSamples.reduce(0.0) { acc, sample in
+            let duration = sample.end.timeIntervalSince(sample.start)
+            let sampleMin = duration > 0 ? duration / 60.0 : 1.0 / 60.0
+            return acc + sampleMin * Double(zoneWeight(
+                bpm: sample.bpm,
+                restingHR: restingHR,
+                hrReserve: hrReserve
+            ))
+        }
     }
 
     static func trimpToStrain(_ trimp: Double) -> Double {

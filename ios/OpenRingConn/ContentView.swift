@@ -294,6 +294,12 @@ struct ContentView: View {
                             .frame(width: total > 0 ? geo.size.width * mins(stage) / total : 0)
                     }
                 }
+
+                Section("Settings") {
+                    NavigationLink("User Profile") {
+                        UserProfileSettingsView()
+                    }
+                }
             }
             .frame(height: 12)
             .clipShape(Capsule())
