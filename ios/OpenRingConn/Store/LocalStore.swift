@@ -71,6 +71,77 @@ final class StoredCursor {
     }
 }
 
+/// Persisted nightly sleep summary (total asleep + estimated stage breakdown) so the
+/// dashboard shows the last night OFFLINE, after the ring disconnects. Keyed by `night`
+/// (start-of-day of the sleep window's start) and UPSERTED so re-syncing the same night
+/// replaces rather than duplicates. Stage minutes are an on-device ESTIMATE — the ring
+/// doesn't transmit stage labels (PROTOCOL.md §5.3).
+///
+/// Every non-optional attribute has a default so SwiftData lightweight migration can add
+/// this table to stores written before it existed without trapping at launch (cf. #21).
+@Model
+final class StoredSleepSummary {
+    @Attribute(.unique) var night: Date = Date.distantPast
+    var asleepMin: Int = 0
+    var deepMin: Int = 0
+    var lightMin: Int = 0
+    var remMin: Int = 0
+    var awakeMin: Int = 0
+    var efficiency: Double = 0
+    var updatedAt: Date = Date.distantPast
+
+    init(
+        night: Date,
+        asleepMin: Int = 0,
+        deepMin: Int = 0,
+        lightMin: Int = 0,
+        remMin: Int = 0,
+        awakeMin: Int = 0,
+        efficiency: Double = 0,
+        updatedAt: Date = Date()
+    ) {
+        self.night = night
+        self.asleepMin = asleepMin
+        self.deepMin = deepMin
+        self.lightMin = lightMin
+        self.remMin = remMin
+        self.awakeMin = awakeMin
+        self.efficiency = efficiency
+        self.updatedAt = updatedAt
+    }
+
+    /// Rebuild a `SleepStaging.Summary` for the dashboard. `inBed` is recovered from the
+    /// stored efficiency (asleep / efficiency) so the displayed % matches; the per-stage
+    /// minutes round-trip exactly since they're already whole minutes.
+    var asSummary: SleepStaging.Summary {
+        let light = Double(lightMin) * 60
+        let deep = Double(deepMin) * 60
+        let rem = Double(remMin) * 60
+        let awake = Double(awakeMin) * 60
+        let asleep = light + deep + rem
+        let inBed = efficiency > 0 ? asleep / efficiency : asleep + awake
+        return SleepStaging.Summary(inBed: inBed, awake: awake, light: light, deep: deep, rem: rem)
+    }
+}
+
+/// Per-day rollups for values that are NOT epoch samples and must NOT flow through the
+/// cumulative-counter `ingest` path (which computes HealthKit deltas). Currently the
+/// ring's onboard step count for the day. Keyed by `day` (start-of-day) and UPSERTED, so
+/// the dashboard can show "steps today" offline without disturbing `SyncCursor` /
+/// `cumulativeState` / Apple Health writes.
+@Model
+final class StoredDaily {
+    @Attribute(.unique) var day: Date = Date.distantPast
+    var steps: Int = 0
+    var updatedAt: Date = Date.distantPast
+
+    init(day: Date, steps: Int = 0, updatedAt: Date = Date()) {
+        self.day = day
+        self.steps = steps
+        self.updatedAt = updatedAt
+    }
+}
+
 @MainActor
 struct LocalStore {
     let context: ModelContext
@@ -163,6 +234,70 @@ struct LocalStore {
         )
         descriptor.fetchLimit = 1
         return try context.fetch(descriptor).first?.sample
+    }
+
+    // MARK: Sleep summary + daily steps (offline dashboard, separate from `ingest`)
+
+    /// Upsert the nightly sleep summary, keyed by start-of-day of `night`. Re-syncing the
+    /// same night overwrites the existing row rather than inserting a duplicate. Does NOT
+    /// touch the SyncCursor — gating sleep history for HealthKit stays in `ingestSleep`.
+    func saveSleepSummary(_ summary: SleepStaging.Summary, night: Date) throws {
+        let dayStart = Calendar.current.startOfDay(for: night)
+        let m = summary.minutes
+        let descriptor = FetchDescriptor<StoredSleepSummary>(
+            predicate: #Predicate { $0.night == dayStart })
+        if let existing = try? context.fetch(descriptor).first {
+            existing.asleepMin = m.asleep
+            existing.deepMin = m.deep
+            existing.lightMin = m.light
+            existing.remMin = m.rem
+            existing.awakeMin = m.awake
+            existing.efficiency = summary.efficiency
+            existing.updatedAt = Date()
+        } else {
+            context.insert(StoredSleepSummary(
+                night: dayStart,
+                asleepMin: m.asleep,
+                deepMin: m.deep,
+                lightMin: m.light,
+                remMin: m.rem,
+                awakeMin: m.awake,
+                efficiency: summary.efficiency
+            ))
+        }
+        try context.save()
+    }
+
+    /// Most recent stored sleep summary (latest night), or nil.
+    func latestSleepSummary() throws -> StoredSleepSummary? {
+        var descriptor = FetchDescriptor<StoredSleepSummary>(
+            sortBy: [SortDescriptor(\.night, order: .reverse)])
+        descriptor.fetchLimit = 1
+        return try context.fetch(descriptor).first
+    }
+
+    /// Upsert the day's step count, keyed by start-of-day. The ring's onboard count only
+    /// grows within a day, so keep the max for the day; a new day gets its own row.
+    func saveDailySteps(_ steps: Int, day: Date = Date()) throws {
+        guard steps > 0 else { return }
+        let dayStart = Calendar.current.startOfDay(for: day)
+        let descriptor = FetchDescriptor<StoredDaily>(
+            predicate: #Predicate { $0.day == dayStart })
+        if let existing = try? context.fetch(descriptor).first {
+            existing.steps = max(existing.steps, steps)
+            existing.updatedAt = Date()
+        } else {
+            context.insert(StoredDaily(day: dayStart, steps: steps))
+        }
+        try context.save()
+    }
+
+    /// Most recent stored daily rollup (latest day), or nil.
+    func latestDaily() throws -> StoredDaily? {
+        var descriptor = FetchDescriptor<StoredDaily>(
+            sortBy: [SortDescriptor(\.day, order: .reverse)])
+        descriptor.fetchLimit = 1
+        return try context.fetch(descriptor).first
     }
 
     private func upsertCursor(kind: String, last: Date) {

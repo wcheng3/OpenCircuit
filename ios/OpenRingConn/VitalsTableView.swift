@@ -7,10 +7,27 @@ import OpenRingKit
 struct VitalsTableView: View {
     /// Most-recent samples first; we reduce to the latest per kind in `latest`.
     @Query(sort: \StoredSample.start, order: .reverse) private var samples: [StoredSample]
+    /// Persisted sleep summaries (latest night first) — the offline fallback for `sleep`.
+    @Query(sort: \StoredSleepSummary.night, order: .reverse) private var storedSleep: [StoredSleepSummary]
+    /// Persisted daily rollups (latest day first) — the offline fallback for live steps.
+    @Query(sort: \StoredDaily.day, order: .reverse) private var storedDaily: [StoredDaily]
     /// Live session (optional) — its readings override stored ones while connected.
     var session: RingSession?
-    /// Sleep summary for the most recent night (total asleep + estimated stage breakdown).
+    /// LIVE sleep summary for the most recent night (total asleep + estimated stage
+    /// breakdown). When nil (no live session), `effectiveSleep` falls back to the store.
     var sleep: SleepStaging.Summary?
+
+    /// Prefer the live session summary; fall back to the latest stored night offline.
+    private var effectiveSleep: SleepStaging.Summary? {
+        if let sleep { return sleep }
+        guard let s = storedSleep.first, s.asleepMin > 0 else { return nil }
+        return s.asSummary
+    }
+
+    /// Prefer the ring's live onboard count; fall back to today's stored count offline.
+    private var effectiveSteps: Int? {
+        session?.steps ?? storedDaily.first?.steps
+    }
 
     private var latest: [MetricKind: StoredSample] {
         var out: [MetricKind: StoredSample] = [:]
@@ -42,7 +59,7 @@ struct VitalsTableView: View {
             divider
             row("Resting HR", value: restingHR.map { "\($0) bpm" } ?? "—", time: nil)
             divider
-            row("Steps (today)", value: stepsText, time: session?.steps != nil ? "live" : nil)
+            row("Steps (today)", value: stepsText, time: stepsTime)
             divider
             row("Respiratory Rate", value: "— (todo)", time: nil)
             divider
@@ -54,7 +71,7 @@ struct VitalsTableView: View {
     /// Sleep: total asleep + estimated Deep/Light/REM/Awake breakdown (stages are an
     /// on-device estimate — the ring doesn't send stage labels).
     @ViewBuilder private var sleepSection: some View {
-        if let s = sleep, s.minutes.asleep > 0 {
+        if let s = effectiveSleep, s.minutes.asleep > 0 {
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text("Sleep").font(.subheadline)
@@ -106,8 +123,14 @@ struct VitalsTableView: View {
     /// Ring's onboard step count — live while connected (the descriptor streams it). It's
     /// the ring's own count, which can differ from the official app's cloud daily total.
     private var stepsText: String {
-        guard let s = session?.steps else { return "—" }
+        guard let s = effectiveSteps else { return "—" }
         return "\(s)"
+    }
+    /// "live" while connected; else the relative time of the stored day's last update.
+    private var stepsTime: String? {
+        if session?.steps != nil { return "live" }
+        guard let d = storedDaily.first, d.steps > 0 else { return nil }
+        return Self.rel.localizedString(for: d.updatedAt, relativeTo: Date())
     }
 
     private func tempString(_ celsius: Double) -> String {

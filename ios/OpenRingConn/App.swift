@@ -23,7 +23,8 @@ struct OpenRingConnApp: App {
     /// Prefer a real `SchemaMigrationPlan` for *expected* migrations; this is the
     /// last-resort net so a model change can never hard-crash launch again.
     static func makeContainer() -> ModelContainer {
-        let schema = Schema([StoredSample.self, StoredCursor.self])
+        let schema = Schema([StoredSample.self, StoredCursor.self,
+                             StoredSleepSummary.self, StoredDaily.self])
         let config = ModelConfiguration(schema: schema)
 
         do {
