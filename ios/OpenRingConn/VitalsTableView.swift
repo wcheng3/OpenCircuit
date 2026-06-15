@@ -24,9 +24,12 @@ struct VitalsTableView: View {
         return s.asSummary
     }
 
-    /// Prefer the ring's live onboard count; fall back to today's stored count offline.
+    /// Prefer the ring's live onboard count; fall back to the stored count ONLY if it's
+    /// today's (the row is labeled "today", so a prior day's total must not appear).
     private var effectiveSteps: Int? {
-        session?.steps ?? storedDaily.first?.steps
+        if let s = session?.steps { return s }
+        let today = Calendar.current.startOfDay(for: Date())
+        return storedDaily.first.flatMap { $0.day == today ? $0.steps : nil }
     }
 
     private var latest: [MetricKind: StoredSample] {
@@ -81,7 +84,7 @@ struct VitalsTableView: View {
                 }
                 Text("Deep \(s.minutes.deep)m · Light \(s.minutes.light)m · REM \(s.minutes.rem)m · Awake \(s.minutes.awake)m")
                     .font(.caption2).foregroundStyle(.secondary)
-                Text("est. · \(Int((s.efficiency * 100).rounded()))% efficiency")
+                Text("est.\(sleepWhen.map { " · \($0)" } ?? "") · \(Int((s.efficiency * 100).rounded()))% efficiency")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
             .padding(.vertical, 8)
@@ -126,11 +129,21 @@ struct VitalsTableView: View {
         guard let s = effectiveSteps else { return "—" }
         return "\(s)"
     }
-    /// "live" while connected; else the relative time of the stored day's last update.
+    /// "live" while connected; else the relative time of today's stored count (nil if the
+    /// only stored count is from a prior day — `effectiveSteps` shows "—" then).
     private var stepsTime: String? {
         if session?.steps != nil { return "live" }
-        guard let d = storedDaily.first, d.steps > 0 else { return nil }
+        let today = Calendar.current.startOfDay(for: Date())
+        guard let d = storedDaily.first, d.day == today, d.steps > 0 else { return nil }
         return Self.rel.localizedString(for: d.updatedAt, relativeTo: Date())
+    }
+
+    /// For a STORED (not live) sleep summary, the night it covers, so a days-old summary
+    /// isn't shown as if it were last night. nil when the value is live.
+    private var sleepWhen: String? {
+        guard sleep == nil, let s = storedSleep.first else { return nil }
+        let f = DateFormatter(); f.dateFormat = "MMM d"
+        return f.string(from: s.night)
     }
 
     private func tempString(_ celsius: Double) -> String {
