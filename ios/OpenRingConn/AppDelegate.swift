@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                     store: LocalStore(container.mainContext),
                     health: HealthKitWriter()
                 )
-                let synced = try await service.syncLiveHeartRate(timeout: 20)
+                let synced = try await service.syncVitals(timeout: 20)
                 guard !Task.isCancelled else { return }
                 scheduler.schedule()
                 task.setTaskCompleted(success: synced)

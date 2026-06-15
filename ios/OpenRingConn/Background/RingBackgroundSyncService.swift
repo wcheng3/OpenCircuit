@@ -11,18 +11,20 @@ struct RingBackgroundSyncService {
         self.health = health
     }
 
-    func syncLiveHeartRate(timeout: TimeInterval = 20) async throws -> Bool {
+    /// One bounded background read: connect, grab a live HR sample AND the skin temperature
+    /// the descriptor streams on connect, persist both, disconnect. Wiring the store into the
+    /// scanner lets `RingSession` auto-persist temperature; HR is persisted here. Returns true
+    /// if an HR sample was captured (the BGTask success flag).
+    @discardableResult
+    func syncVitals(timeout: TimeInterval = 20) async throws -> Bool {
         let scanner = RingScanner()
-        guard let hr = await scanner.readLiveHeartRate(timeout: timeout) else {
-            return false
-        }
+        scanner.setLocalStore(store)   // RingSession persists skin temp from the descriptor
+        let hr = await scanner.readLiveHeartRate(timeout: timeout)
 
-        let now = Date()
-        let samples = try store.ingest([
-            QuantitySample(kind: .heartRate, start: now, value: Double(hr))
-        ])
-        if HealthKitWriter.isAvailable {
-            try? await health.write(samples)
+        guard let hr else { return false }
+        let fresh = try store.ingest([QuantitySample(kind: .heartRate, start: Date(), value: Double(hr))])
+        if HealthKitWriter.isAvailable, !fresh.isEmpty {
+            try? await health.write(fresh)
         }
         return true
     }
