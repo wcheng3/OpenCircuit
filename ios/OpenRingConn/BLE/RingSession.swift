@@ -129,6 +129,7 @@ final class RingSession: NSObject {
                 self.sleepSegments = BulkSleep.sleepSegments(from: self.bulkRecords)
                 self.stagedSegments = BulkSleep.stagedSegments(from: self.bulkRecords)
                 self.persist(self.historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
+                self.persistSleepAndSteps()          // sleep summary + steps for offline display
             }
             // 3. Leave bulk mode and enter the selected live mode.
             for cmd in [Command.statusQuery, modeCmd, Command.fetch] {
@@ -162,6 +163,20 @@ final class RingSession: NSObject {
     private func persist(_ samples: [QuantitySample]) {
         guard let localStore, !samples.isEmpty else { return }
         storedMetricSamples += (try? localStore.ingest(samples).count) ?? 0
+    }
+
+    /// Persist the latest night's sleep summary + today's step count so the dashboard
+    /// shows them OFFLINE after disconnect. Both UPSERT by day (no duplicates) and bypass
+    /// the cumulative-counter `ingest` path entirely — the SyncCursor is untouched.
+    private func persistSleepAndSteps() {
+        guard let localStore else { return }
+        if !stagedSegments.isEmpty {
+            let summary = SleepStaging.summary(stagedSegments)
+            // `night` = start of the sleep window (segments carry the dates; Summary doesn't).
+            let night = stagedSegments.map(\.start).min() ?? Date()
+            try? localStore.saveSleepSummary(summary, night: night)
+        }
+        if let steps { try? localStore.saveDailySteps(steps) }
     }
 
     /// Start (or switch) live monitoring in a single mode. Guarantees only one metric
@@ -211,6 +226,8 @@ final class RingSession: NSObject {
         if let hr = liveHR { last.append(QuantitySample(kind: .heartRate, start: now, value: Double(hr))) }
         if let spo2 = liveSpO2 { last.append(QuantitySample(kind: .spo2, start: now, value: Double(spo2) / 100)) }
         persist(last)
+        // Steps stream live over 0x10/0x87 — persist the latest so it survives disconnect.
+        if let steps { try? localStore?.saveDailySteps(steps) }
     }
 
     /// Pull stored history: open the sync session (cursor = everything) and fetch.
@@ -252,6 +269,7 @@ final class RingSession: NSObject {
         sleepSegments = BulkSleep.sleepSegments(from: bulkRecords)
         stagedSegments = BulkSleep.stagedSegments(from: bulkRecords)
         persist(historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
+        persistSleepAndSteps()    // sleep summary + steps for offline display
         syncing = false
         syncTask = nil
         if !bulkRecords.isEmpty {

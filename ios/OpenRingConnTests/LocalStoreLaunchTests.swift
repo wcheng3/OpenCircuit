@@ -7,6 +7,7 @@ final class LocalStoreLaunchTests: XCTestCase {
     func testLaunchSnapshotReadsLastKnownHeartRate() throws {
         let container = try ModelContainer(
             for: StoredSample.self, StoredCursor.self,
+            StoredSleepSummary.self, StoredDaily.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         let context = container.mainContext
