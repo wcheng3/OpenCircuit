@@ -363,19 +363,33 @@ is the low byte of the final cursor). `[0:3]`=`50 00 00`, then 6-byte entries
 synced range, e.g. `50 00 00 | 15 12 0c22aae4 | 15 12 0c22acb5`. A 21-byte variant
 is undecoded 🔴.
 
-### 5.6 `0x02` sync cursor — TIMESTAMP 🟢 CONFIRMED
+### 5.6 `0x02` sync cursor — TIMESTAMP 🟢 CONFIRMED (issue #3 + #5 closed)
 Host write `02 00 <cursor:4 BE> <flag:1> 01 00` → `82 00 00 82`.
 **cursor = 4-byte BE seconds since epoch `1577793600` (2019-12-31 12:00:00 UTC)** —
 3 (time,value) pairs + 2 in-frame cross-checks agree to <0.34 s; 1/sec, monotonic;
 same epoch as the record counters. Build current: `floor(unix_utc) − 1577793600`,
 BE, into `02 00 <BE4> 00 01 00`; `FF FF FF FF` = "everything" while backlog exists.
-The 12 h offset vs 2020-01-01 is byte-confirmed but its **cause** (local-tz vs
-firmware epoch vs AM/PM) is unresolved from one timezone 🟡. `flag` byte[6]
-(`00`/`03`) meaning unknown 🟡.
+
+**No 12 h offset in decoded data 🟢 (issue #5 closed, `morning_temp_20260615`).**
+The epoch `1577793600` is 2019-12-31 **12:00:00** UTC (noon, not midnight): the 12 h
+"offset vs 2020-01-01" is simply the epoch constant value, NOT a decode error. Verified
+across **20 independent sync-open events** spanning 2026-06-13 21:52 UTC through
+2026-06-15 09:11 UTC: decoded cursor time matches capture wall-clock to < 0.5 s in
+every case (max observed delta 0.5 s, median 0.2 s). No timezone-dependent offset.
+`flag` byte[6] (`00`/`03`) meaning unknown 🟡.
 
 ### 5.7 `0x81` — status replies (← `0x01`)
 **`81 00 XX YY`** (← `01 00 00`): `[2]` is the only varying byte, full 8-bit range,
->100 → **not battery %**; likely a session token 🔴.
+>100 → **not battery %**; per-session nonce / ring-state token 🟡 (issue #4).
+
+**Byte[2] analysis, 20 BLE sessions, `morning_temp_20260615_btsnoop.log` 🟢:**
+Values span 31–249 (range=218; full 8-bit), definitively not battery % (values >100
+common: 176, 218, 216, 203, 227, 249). Non-monotonic within an hour: 7 consecutive
+sessions at 13:28–13:52 UTC return 31→120→227→63→249→188→157→128 — no slow battery-like
+drift. Two connections using recycled handle 0x002 (separated by >15 h) return
+different values (176 vs 148). Consistent with **per-session ring-state assignment** or
+a random nonce; source unknown 🔴. Settle with a long wear/discharge battery test.
+
 **`81 01 …`** (38 B, ← `01 01 <nonce>`): mostly constant; notable — `[27:32]`=
 `21 49 ac <XX> f4` (4/5 const, device-id-like) · `[34:36]`=16-bit monotonic counter
 ≈ 1/sec (30→1475→9045 over 3 sessions) 🟡. The `01 01 <3-B nonce>` arg is per-session
@@ -394,13 +408,21 @@ Each names the single capture that converts a 🟡/🔴 field into a decoded met
    a separate summary frame). Stages are app-computed, not on the wire. (Issue #7/#9.)
 3. ✅ **Counter→wall-clock — PINNED.** Counter is seconds (§5.6 epoch); the bulk-record
    step `+0x96` = **150 s**, so each `0x4c` record is a 2.5-min epoch and `0x47` records
-   span `0x0384`=900 s. Cross-checked: last session ends 6 min before the sync. (Issue #3.)
+   span `0x0384`=900 s. Cross-checked: last session ends 6 min before the sync.
+   `morning_temp_20260615` re-confirms: 28/29 `0x4c` steps=150 (1×151 rounding), 19/19
+   `0x47` steps=900, across 752 `0x4c` and 128 `0x47` records. (Issue #3 ✅ closed.)
 4. **`0x10`/`0x87` `[6:8]`/`[15]`:** sync after a known wear interval + app UI/battery
    screenshot → maps A/B to record counts and `[15]` to a real quantity.
-5. **`0x81` token vs battery:** repeat `01 00 00` within a session & across battery
-   levels → is `81 00 [2]` a token or battery; disambiguate `81 01 [34:36]`.
-6. **`0x02` epoch cause:** a capture incl. the clock-SET command, or a sync from a
-   phone set to UTC → resolves the 12 h offset.
+5. ✅ **`0x81 00` byte[2] — NOT battery; per-session nonce 🟡.** `morning_temp_20260615`
+   shows 20 sessions, byte[2] spans 31–249, non-monotonic, exceeds 100% repeatedly.
+   Definitively not battery %. Likely a per-session ring-state nonce (source unknown 🔴).
+   To settle: capture `01 00 00` responses across a full battery discharge cycle from 100%
+   to <20% — if byte[2] shows no correlation with battery level, the nonce hypothesis is
+   confirmed. (Issue #4 partially answered — battery ruled out; nonce still 🔴.)
+6. ✅ **`0x02` epoch / 12 h offset — RESOLVED.** The epoch is noon UTC on 2019-12-31;
+   the "12 h" is the epoch constant, not a decode error. 20 sync-open events confirm
+   decoded UTC matches capture wall-clock to < 0.5 s. No 12 h offset in decoded data.
+   (Issue #5 ✅ closed; see §5.6.)
 7. **Session nonce source:** correlate `01 01 <nonce>` against prior `0x81`/`0x10`
    fields. *(Not required — nonce is arbitrary; §4.)*
 8. **Skin temp + its transport:** temp is measured only at night yet is absent from a full
