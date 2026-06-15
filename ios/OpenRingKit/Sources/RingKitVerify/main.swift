@@ -279,10 +279,12 @@ let dsr = BulkRecord(hex("0c22d5bf444d057a620a01010101012aa0000090000004"))!
 check(dsr.heartRate == 68, "sleep-vitals [4] -> HR 68 bpm (🟢 app-confirmed)")
 check(dsr.hrvRMSSD == 77, "sleep-vitals [5] -> HRV 77 ms (🟢)")
 check(dsr.spo2Percent == 98, "sleep-vitals [8] -> SpO2 98% (🟢)")
+check(dsr.respiratoryRate == 15.25, "sleep-vitals [7] 0x7a/8 -> RR 15.25 brpm (🟢, app avg 15.1)")
 check(dsr.counter == 0x0c22d5bf, "record [0:4] -> BE counter")
 let dsSamples = BulkSleep.samples(from: [dsr])
-check(dsSamples.count == 3, "sleep-vitals -> HR + HRV + SpO2 samples")
+check(dsSamples.count == 4, "sleep-vitals -> HR + HRV + SpO2 + RR samples")
 check(dsSamples.first(where: { $0.kind == .spo2 })?.value == 0.98, "SpO2 emitted as 0…1 fraction")
+check(dsSamples.first(where: { $0.kind == .respiratoryRate })?.value == 15.25, "RR sample emitted")
 let idleRec = BulkRecord(hex("0c099dbf05000c00120a01010101010000000000000000"))!
 check(idleRec.layout == .idle && BulkSleep.samples(from: [idleRec]).isEmpty,
       "idle template -> no samples")

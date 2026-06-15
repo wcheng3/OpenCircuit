@@ -68,11 +68,12 @@ final class BulkSleepTests: XCTestCase {
     func testSamplesFromSleepVitals() {
         let r = BulkRecord(hex(deepSleepRec))!
         let s = BulkSleep.samples(from: [r])
-        XCTAssertEqual(s.count, 3, "HR + HRV + SpO2")
+        XCTAssertEqual(s.count, 4, "HR + HRV + SpO2 + respiratory rate")
         let byKind = Dictionary(grouping: s, by: { $0.kind })
         XCTAssertEqual(byKind[.heartRate]?.first?.value, 68)
         XCTAssertEqual(byKind[.hrvSDNN]?.first?.value, 77)
         XCTAssertEqual(byKind[.spo2]?.first?.value, 0.98, "SpO2 emitted as 0…1 fraction")
+        XCTAssertEqual(byKind[.respiratoryRate]?.first?.value, 15.25, "RR = byte[7] 0x7a / 8 (🟢)")
         XCTAssertEqual(s.first?.start,
                        Date(timeIntervalSince1970: TimeInterval(Int(0x0c22d5bf) + Command.syncEpoch)))
     }

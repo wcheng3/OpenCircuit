@@ -84,6 +84,15 @@ public struct BulkRecord: Equatable {
         return Int(raw[8])
     }
 
+    /// Respiratory rate in breaths/min — `[7]` on a sleep-vitals epoch, scaled ÷8 (🟢,
+    /// ground-truthed 2026-06-15): per-epoch `[7]/8` matches the RingConn app's nightly
+    /// average 15.1 and its low/high 14.5–16.1 at the p5–p95 of the asleep epochs. (The
+    /// raw field is RR×8; exact divisor ≈8.07, but 8 is the natural 1/8-brpm fixed point.)
+    public var respiratoryRate: Double? {
+        guard layout == .sleepVitals, raw[7] > 0 else { return nil }
+        return Double(raw[7]) / 8.0
+    }
+
     /// `[10:15]` — 5 per-30 s motion/activity counts (🟢 role). `01` baseline = still.
     public var motion: [UInt8] { Array(raw[10..<15]) }
 }
@@ -193,6 +202,9 @@ public enum BulkSleep {
             }
             if let spo2 = r.spo2Percent {
                 out.append(QuantitySample(kind: .spo2, start: t, value: Double(spo2) / 100.0))
+            }
+            if let rr = r.respiratoryRate {
+                out.append(QuantitySample(kind: .respiratoryRate, start: t, value: rr))
             }
         }
         return out

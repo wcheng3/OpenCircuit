@@ -64,7 +64,8 @@ struct VitalsTableView: View {
             divider
             row("Steps (today)", value: stepsText, time: stepsTime)
             divider
-            row("Respiratory Rate", value: "— (todo)", time: nil)
+            row("Respiratory Rate", value: valueText(.respiratoryRate) { String(format: "%.1f /min", $0) },
+                time: timeFor(.respiratoryRate))
             divider
             sleepSection
         }

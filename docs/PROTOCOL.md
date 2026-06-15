@@ -244,8 +244,14 @@ time (no 12 h offset in this capture; bears on §5.6/§6.6). Reassemble + decode
   spread (36–114) as expected for RMSSD.
 - **`[8]` = SpO2 (%)** 🟢. Mean 96, and the low cluster (89–93) lands at **02:32–03:07**,
   matching the app's "lowest 93 % around 2:30–3 am" — the decisive temporal anchor.
-- `[6]` (1–10, ~9) and `[7]` (~120) unresolved 🟡 — candidate signal-quality / pulse
-  amplitude. `[9]`≈`0x0a` and `[22]` (low-nibble `4`, high-nibble varies) flags 🟡.
+- **`[7]` = RESPIRATORY RATE × 8** 🟢 (ground-truthed 2026-06-15). On the asleep epochs,
+  `[7]/8` gives mean 15.2 vs the app's nightly **15.1**, and p5–p95 **14.6–16.0** vs the
+  app's reported low/high **14.5–16.1** — near-exact. RR IS per-epoch and single-night (no
+  model needed); earlier captures missed it only because the value (~120) was mistaken for
+  signal quality. Exact divisor ≈8.07; 8 is the natural 1/8-brpm fixed point. Decoded by
+  `BulkRecord.respiratoryRate`.
+- `[6]` (1–10, ~9) unresolved 🟡 — candidate signal quality. `[9]`≈`0x0a` and `[22]`
+  (low-nibble `4`, high-nibble varies) flags 🟡.
 - **Respiratory rate (15 bpm) and skin temp are NOT in ANY frame this sync captured** 🔴.
   Verified exhaustively: every byte and 16-bit field of the `0x4c`/`0x47`/`0x10`/`0x87`/
   `0x81`/`0x15` frames (no stable `0x0f` RR; no temp value at `358`/`359`=0.1 °C,
