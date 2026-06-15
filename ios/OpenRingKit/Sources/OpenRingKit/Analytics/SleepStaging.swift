@@ -52,10 +52,12 @@ public enum SleepStaging {
         public var remVarPercentile: Double
         /// Half-window (epochs each side) for the rolling HR/HRV variability estimate.
         public var variabilityHalfWindow: Int
-        /// Absolute floor (bpm) for the Deep variability gate, so a flat night still
-        /// admits Deep.
+        /// Non-degeneracy floor for the Deep variability gate, so a flat night still admits
+        /// Deep. NOTE: this is on the *blended* variability scale (HR rolling-SD plus
+        /// `hrvVarWeight`×HRV rolling-SD), not raw bpm — the threshold is `max(percentile, floor)`
+        /// over that same blended pool, so the floor only binds on near-zero-variance nights.
         public var deepVarFloor: Double
-        /// Absolute floor (bpm) for the REM variability gate, so tiny noise is not REM.
+        /// Non-degeneracy floor for the REM variability gate (blended scale; see deepVarFloor).
         public var remVarFloor: Double
         /// Minimum consolidated run length (epochs) for Deep; shorter → relabelled Light.
         public var minDeepRunEpochs: Int
@@ -182,10 +184,12 @@ public enum SleepStaging {
         while i < rows.count {
             var j = i
             while j + 1 < rows.count && stages[j + 1] == stages[i] { j += 1 }
-            let end = j + 1 < rows.count
-                ? rows[j + 1].time
-                : rows[j].time.addingTimeInterval(Double(BulkRecord.epochSeconds))
-            segs.append(SleepSegment(start: rows[i].time, end: min(end, block.end), stage: stages[i]))
+            // Fully tile [block.start, block.end] so staged segments partition the inBed
+            // window (else efficiency is understated): clamp the first segment's start to
+            // block.start and the last segment's end to block.end. (Reviewer MINOR fix.)
+            let segStart = (i == 0) ? block.start : rows[i].time
+            let segEnd = (j + 1 < rows.count) ? rows[j + 1].time : block.end
+            segs.append(SleepSegment(start: segStart, end: min(segEnd, block.end), stage: stages[i]))
             i = j + 1
         }
         return segs

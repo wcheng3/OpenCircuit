@@ -89,6 +89,9 @@ final class RingScanner: NSObject {
 
     func stop() {
         wantConnection = false
+        // Explicit user stop: forget the ring so we don't silently auto-reconnect on the next
+        // launch (reconnect-by-identifier only re-arms while an id is saved). (Reviewer MINOR.)
+        Self.savedPeripheralID = nil
         central.stopScan()
         if let target { central.cancelPeripheralConnection(target) }
         if case .scanning = state { state = .idle }
@@ -145,6 +148,21 @@ final class RingScanner: NSObject {
         state = .idle
     }
 
+    /// End-of-background-read teardown that RE-ARMS reconnection. The bounded read must not
+    /// leave the link held open, but a plain `disconnect()` also clears the standing pending
+    /// connect that lets iOS wake us (state restoration) next time the ring is in range —
+    /// disarming the very background path we want. So: drop the live link, then re-issue a
+    /// no-scan pending connect-by-identifier so reconnection stays armed across the next
+    /// suspension. (Reviewer MAJOR fix.)
+    private func endBackgroundReadRearming() {
+        session?.stopLiveMonitoring()
+        session = nil
+        if let target { central.cancelPeripheralConnection(target) }
+        target = nil
+        state = .idle
+        reconnectKnownPeripheral()   // re-arm the standing pending connect (no scan)
+    }
+
     /// Bounded one-shot live-HR read for the background-refresh task: scan/connect,
     /// start HR monitoring, and return the first reading (or nil on timeout). Always
     /// disconnects on the way out so the link isn't held open in the background.
@@ -157,7 +175,7 @@ final class RingScanner: NSObject {
             start(services: Self.backgroundScanServices)
         }
 
-        defer { disconnect() }
+        defer { endBackgroundReadRearming() }
 
         while !Task.isCancelled && Date() < deadline {
             if let session, session.ready {
@@ -184,7 +202,14 @@ extension RingScanner: CBCentralManagerDelegate {
         Task { @MainActor in
             switch central.state {
             case .poweredOn:
-                self.state = .idle
+                // Don't clobber a link state restoration already rebuilt: willRestoreState
+                // runs BEFORE this and may have set .connected/.connecting. Only fall back to
+                // .idle from a non-connected state (otherwise the UI would show "Scan & connect"
+                // over a live connection).
+                switch self.state {
+                case .connected, .connecting: break
+                default: self.state = .idle
+                }
                 // A reconnect was requested before Bluetooth was ready (cold/background
                 // launch) — complete it now that the radio is on.
                 if self.reconnectWhenPoweredOn { self.reconnectKnownPeripheral() }
@@ -219,7 +244,12 @@ extension RingScanner: CBCentralManagerDelegate {
             default:
                 // Re-issue the pending connect so we reconnect when the ring is in range.
                 self.state = .connecting(peripheral.name ?? "RingConn")
-                self.central.connect(peripheral)
+                if self.central.state == .poweredOn {
+                    self.central.connect(peripheral)
+                } else {
+                    // Radio not up yet on a cold restoration — retry once powered on.
+                    self.reconnectWhenPoweredOn = true
+                }
             }
         }
     }

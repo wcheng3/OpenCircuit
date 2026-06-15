@@ -75,17 +75,16 @@ struct ContentView: View {
     private var vitalsCard: some View {
         card {
             Text("VITALS").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            VitalsTableView(session: session, sleepMinutes: sleepMinutes)
+            VitalsTableView(session: session, sleep: sleepSummary)
         }
     }
 
-    /// Total time asleep for the most recent night (minutes), from the last sync's
-    /// segments — sum of the asleep stages (excludes the inBed wrapper and awake).
-    private var sleepMinutes: Int? {
-        guard let segs = session?.sleepSegments, !segs.isEmpty else { return nil }
-        let asleep = segs.filter { $0.stage != .inBed && $0.stage != .awake }
-        let secs = asleep.reduce(0.0) { $0 + $1.duration }
-        return secs > 0 ? Int(secs / 60) : nil
+    /// Sleep summary (total asleep + Deep/Light/REM/Awake breakdown) for the most recent
+    /// night, from the staged segments. Stages are an on-device ESTIMATE — the ring doesn't
+    /// transmit stage labels (PROTOCOL.md §5.3) — so the dashboard labels them "est.".
+    private var sleepSummary: SleepStaging.Summary? {
+        guard let segs = session?.stagedSegments, !segs.isEmpty else { return nil }
+        return SleepStaging.summary(segs)
     }
 
     // MARK: Live — two independent sections, but only one reads at a time

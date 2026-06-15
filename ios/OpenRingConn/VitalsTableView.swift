@@ -9,8 +9,8 @@ struct VitalsTableView: View {
     @Query(sort: \StoredSample.start, order: .reverse) private var samples: [StoredSample]
     /// Live session (optional) — its readings override stored ones while connected.
     var session: RingSession?
-    /// Total sleep for the most recent night, minutes (from the last sync's segments).
-    var sleepMinutes: Int?
+    /// Sleep summary for the most recent night (total asleep + estimated stage breakdown).
+    var sleep: SleepStaging.Summary?
 
     private var latest: [MetricKind: StoredSample] {
         var out: [MetricKind: StoredSample] = [:]
@@ -44,9 +44,31 @@ struct VitalsTableView: View {
             divider
             row("Respiratory Rate", value: "— (todo)", time: nil)
             divider
-            row("Sleep", value: sleepText, time: nil)
+            sleepSection
         }
         .padding(.vertical, 4)
+    }
+
+    /// Sleep: total asleep + estimated Deep/Light/REM/Awake breakdown (stages are an
+    /// on-device estimate — the ring doesn't send stage labels).
+    @ViewBuilder private var sleepSection: some View {
+        if let s = sleep, s.minutes.asleep > 0 {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text("Sleep").font(.subheadline)
+                    Spacer()
+                    Text("\(s.minutes.asleep / 60)h \(s.minutes.asleep % 60)m")
+                        .font(.subheadline.weight(.semibold)).monospacedDigit()
+                }
+                Text("Deep \(s.minutes.deep)m · Light \(s.minutes.light)m · REM \(s.minutes.rem)m · Awake \(s.minutes.awake)m")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text("est. · \(Int((s.efficiency * 100).rounded()))% efficiency")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 8)
+        } else {
+            row("Sleep", value: "—", time: nil)
+        }
     }
 
     // MARK: rows
@@ -79,11 +101,6 @@ struct VitalsTableView: View {
         if let c = session?.liveTemperature { return tempString(c) }
         return valueText(.temperature) { tempString($0) }
     }
-    private var sleepText: String {
-        guard let m = sleepMinutes, m > 0 else { return "—" }
-        return "\(m / 60)h \(m % 60)m"
-    }
-
     private func tempString(_ celsius: Double) -> String {
         String(format: "%.1f °C  (%.1f °F)", celsius, celsius * 9 / 5 + 32)
     }
