@@ -163,6 +163,25 @@ check(cursor.last(.heartRate) == t2, "cursor advanced to t2; never backward")
 cursor.advance(.heartRate, to: t0)
 check(cursor.last(.heartRate) == t2, "advance() never moves cursor backward")
 
+// --- Cumulative counters ---
+check(MetricKind.steps.isCumulativeCounter, "steps are treated as cumulative counters")
+check(MetricKind.activeEnergy.isCumulativeCounter, "active energy is treated as cumulative counter")
+let stepsFirst = CumulativeMetricAccumulator.accumulate(
+    QuantitySample(kind: .steps, start: t0, value: 100),
+    state: CumulativeMetricState()
+)
+let stepsSecond = CumulativeMetricAccumulator.accumulate(
+    QuantitySample(kind: .steps, start: t1, value: 140),
+    state: CumulativeMetricState(previousRawValue: stepsFirst.rawValue, dailyTotal: stepsFirst.dailyTotal)
+)
+check(stepsFirst.deltaValue == 100 && stepsFirst.dailyTotal == 100, "first cumulative sample uses raw as delta")
+check(stepsSecond.deltaValue == 40 && stepsSecond.dailyTotal == 140, "cumulative sample stores delta and running total")
+let rolledSteps = CumulativeMetricAccumulator.accumulate(
+    QuantitySample(kind: .steps, start: t2, value: 12),
+    state: CumulativeMetricState(previousRawValue: 250, dailyTotal: 250)
+)
+check(rolledSteps.deltaValue == 12 && rolledSteps.dailyTotal == 262, "counter rollover uses raw value as delta")
+
 // --- Analytics (ported from openwhoop-algos) ---
 // HRV / RMSSD
 check(HRV.rmssd([800, 900, 1000]) == 100, "rmssd([800,900,1000]) = 100")
