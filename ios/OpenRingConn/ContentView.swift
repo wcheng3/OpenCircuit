@@ -24,6 +24,7 @@ struct ContentView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     connectionCard
+                    vitalsCard
                     hrCard
                     spo2Card
                     stepsCard
@@ -67,6 +68,24 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
             }
         }
+    }
+
+    // MARK: Vitals dashboard (persisted — always visible)
+
+    private var vitalsCard: some View {
+        card {
+            Text("VITALS").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            VitalsTableView(session: session, sleepMinutes: sleepMinutes)
+        }
+    }
+
+    /// Total time asleep for the most recent night (minutes), from the last sync's
+    /// segments — sum of the asleep stages (excludes the inBed wrapper and awake).
+    private var sleepMinutes: Int? {
+        guard let segs = session?.sleepSegments, !segs.isEmpty else { return nil }
+        let asleep = segs.filter { $0.stage != .inBed && $0.stage != .awake }
+        let secs = asleep.reduce(0.0) { $0 + $1.duration }
+        return secs > 0 ? Int(secs / 60) : nil
     }
 
     // MARK: Live — two independent sections, but only one reads at a time

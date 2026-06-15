@@ -30,6 +30,7 @@ final class RingSession: NSObject {
     /// arriving and climbing, vs. no HR frames at all.
     private(set) var liveHRWarmup: Int?
     private(set) var steps: Int?          // ring onboard step count (0x10/0x87 [4:6], §5.4)
+    private(set) var liveTemperature: Double?   // skin temp °C (0x10/0x87 [6:8]/[8:10], §5.4)
     private(set) var liveMode: LiveMode = .hr
     private(set) var monitoring = false
     /// True during the open→drain phase before the live stream starts. The ring won't
@@ -127,6 +128,7 @@ final class RingSession: NSObject {
                 self.historySamples = BulkSleep.samples(from: self.bulkRecords)
                 self.sleepSegments = BulkSleep.sleepSegments(from: self.bulkRecords)
                 self.stagedSegments = BulkSleep.stagedSegments(from: self.bulkRecords)
+                self.persist(self.historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
             }
             // 3. Leave bulk mode and enter the selected live mode.
             for cmd in [Command.statusQuery, modeCmd, Command.fetch] {
@@ -153,6 +155,13 @@ final class RingSession: NSObject {
 
     func setLocalStore(_ localStore: LocalStore) {
         self.localStore = localStore
+    }
+
+    /// Persist decoded samples to the local store (the vitals dashboard reads from it, so
+    /// data is always visible offline). The SyncCursor dedupes, so repeated calls are safe.
+    private func persist(_ samples: [QuantitySample]) {
+        guard let localStore, !samples.isEmpty else { return }
+        storedMetricSamples += (try? localStore.ingest(samples).count) ?? 0
     }
 
     /// Start (or switch) live monitoring in a single mode. Guarantees only one metric
@@ -196,6 +205,12 @@ final class RingSession: NSObject {
         monitorTask = nil
         monitoring = false
         livePreparing = false
+        // Persist the last live reading so the dashboard shows it after disconnect.
+        let now = Date()
+        var last: [QuantitySample] = []
+        if let hr = liveHR { last.append(QuantitySample(kind: .heartRate, start: now, value: Double(hr))) }
+        if let spo2 = liveSpO2 { last.append(QuantitySample(kind: .spo2, start: now, value: Double(spo2) / 100)) }
+        persist(last)
     }
 
     /// Pull stored history: open the sync session (cursor = everything) and fetch.
@@ -236,6 +251,7 @@ final class RingSession: NSObject {
         historySamples = BulkSleep.samples(from: bulkRecords)
         sleepSegments = BulkSleep.sleepSegments(from: bulkRecords)
         stagedSegments = BulkSleep.stagedSegments(from: bulkRecords)
+        persist(historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
         syncing = false
         syncTask = nil
         if !bulkRecords.isEmpty {
@@ -291,6 +307,12 @@ extension RingSession: CBPeripheralDelegate {
             // are interleaved, so take the running max (today's cumulative count).
             if let s = DeviceStatus.steps(bytes), s > 0 {
                 self.steps = max(self.steps ?? 0, s)
+            }
+            // Skin temperature rides the same 0x10/0x87 descriptor (§5.4). It streams live
+            // (~30–60 s) and is NOT in the sleep sync, so capture + persist it here.
+            if let t = DeviceStatus.skinTemperature(bytes) {
+                self.liveTemperature = t.celsius
+                self.persist([QuantitySample(kind: .temperature, start: Date(), value: t.celsius)])
             }
             // Bulk history pages: accumulate + ack to continue draining (47→c7, 4c→cc).
             switch bytes.first {
