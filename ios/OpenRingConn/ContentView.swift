@@ -109,6 +109,12 @@ struct ContentView: View {
                 Circle().fill(connected ? .green : .secondary).frame(width: 10, height: 10)
                 Text(statusText).font(.subheadline.weight(.medium))
                 Spacer()
+                // Ring battery (a device stat, not a body vital) sits with the connection.
+                if let b = session?.batteryPercent {
+                    Label("\(b)%", systemImage: batteryIcon(b))
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(b <= 20 ? .red : .secondary)
+                }
             }
             if !connected {
                 Button {
@@ -119,6 +125,17 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
             }
+        }
+    }
+
+    /// SF Symbol for the ring's battery level.
+    private func batteryIcon(_ pct: Int) -> String {
+        switch pct {
+        case ..<13: return "battery.0percent"
+        case ..<38: return "battery.25percent"
+        case ..<63: return "battery.50percent"
+        case ..<88: return "battery.75percent"
+        default: return "battery.100percent"
         }
     }
 
