@@ -44,6 +44,7 @@ final class RingSession: NSObject {
     private(set) var ready = false
 
     private var monitorTask: Task<Void, Never>?
+    private var keepaliveTask: Task<Void, Never>?
 
     /// Sleep-vitals samples (HR/HRV/SpO2) decoded from the last history sync,
     /// finalized when the ring reports end-of-history (0x50). Feed to HealthKitWriter.
@@ -159,6 +160,34 @@ final class RingSession: NSObject {
 
     func setLocalStore(_ localStore: LocalStore) {
         self.localStore = localStore
+    }
+
+    /// Idle keepalive — what makes OpenRingConn a *primary* tracker rather than an
+    /// on-demand reader. The 0x10/0x87 descriptor (steps `[4:6]`, skin temp `[6:10]`,
+    /// battery `[1]`) is NOT unsolicited: in the official-app captures it arrives ~every
+    /// 40 s in response to a `07 00 00` (fetch) heartbeat. Without this, steps only
+    /// accumulate during a manual "Measure". With it, as long as we hold the link the ring
+    /// keeps reporting, so the live step delta-accumulation tracks the full day (the only
+    /// gap is time we're not connected — and with no official-app contention, that's it).
+    /// Skips ticks during live monitoring / sync, which generate descriptor traffic of
+    /// their own (and where an extra fetch can disturb the HR warm-up window).
+    func startKeepalive() {
+        guard keepaliveTask == nil else { return }
+        keepaliveTask = Task { [weak self] in
+            // Prime a status session so the ring answers fetch with the descriptor.
+            for cmd in [Command.status0, Command.status1] {
+                guard let self, !Task.isCancelled else { return }
+                self.write(cmd)
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.ready, !self.monitoring, !self.livePreparing, self.syncTask == nil {
+                    self.write(Command.fetch)   // 07 00 00 → fresh 0x10/0x87 descriptor
+                }
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
     }
 
     /// Persist decoded samples to the local store (the vitals dashboard reads from it, so
@@ -315,6 +344,7 @@ extension RingSession: CBPeripheralDelegate {
                 }
             }
             self.ready = (self.notifyChar != nil && self.writeChar != nil)
+            if self.ready { self.startKeepalive() }   // begin continuous descriptor polling (primary tracker)
         }
     }
 
