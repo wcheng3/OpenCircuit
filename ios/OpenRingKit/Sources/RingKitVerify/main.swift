@@ -328,5 +328,47 @@ let zeroPayloadSleep = BulkRecord(hex("0c22cd8b38520973620a010101010100000000000
 check(zeroPayloadSleep.layout == .sleepVitals && zeroPayloadSleep.heartRate == 0x38,
       "zero-payload sleep epoch keeps HR (not mistaken for idle)")
 
+// --- Sleep-stage classifier (SleepStaging, §5.3) ---------------------------------
+// stagedSegments now delegates to SleepStaging.classify; it must produce the same output.
+check(BulkSleep.stagedSegments(from: staged) == SleepStaging.classify(from: staged),
+      "BulkSleep.stagedSegments delegates to SleepStaging.classify")
+
+// Calm flat low HR (still) -> predominantly Deep, no REM.
+var deepNight: [BulkRecord] = []
+var dc: UInt32 = 0x0c220000
+for _ in 0..<12 { deepNight.append(bulkRec(dc, motion: 0x14, sub: 0x12)); dc += 150 }
+for _ in 0..<120 { deepNight.append(vrec(dc, motion: 0x01, hr: 50)); dc += 150 }
+for _ in 0..<12 { deepNight.append(bulkRec(dc, motion: 0x14, sub: 0x12)); dc += 150 }
+let deepSegs = SleepStaging.classify(from: deepNight)
+let deepTotals = SleepStaging.stageTotals(deepSegs)
+let deepAsleep = (deepTotals[.asleepDeep] ?? 0) + (deepTotals[.asleepCore] ?? 0) + (deepTotals[.asleepREM] ?? 0)
+check(deepAsleep > 0 && (deepTotals[.asleepDeep] ?? 0) / deepAsleep > 0.8,
+      "calm flat low HR -> mostly Deep")
+check((deepTotals[.asleepREM] ?? 0) == 0, "calm flat HR -> no REM")
+
+// Constructed multi-cycle night partitions like a tracker: Light ≫ REM > Deep, modest awake.
+func vrecHRV(_ c: UInt32, hr: UInt8, hrv: UInt8) -> BulkRecord {
+    var b = vrec(c, motion: 0x01, hr: hr).raw; b[5] = hrv; return BulkRecord(b)!
+}
+var night2: [BulkRecord] = []
+var nc: UInt32 = 0x0c220000
+for _ in 0..<8 { night2.append(bulkRec(nc, motion: 0x14, sub: 0x12)); nc += 150 }
+for cycle in 0..<5 {
+    for _ in 0..<10 { night2.append(vrecHRV(nc, hr: 56, hrv: 60)); nc += 150 }   // Light
+    for _ in 0..<8  { night2.append(vrecHRV(nc, hr: 50, hrv: 70)); nc += 150 }   // Deep
+    for _ in 0..<8  { night2.append(vrecHRV(nc, hr: 56, hrv: 60)); nc += 150 }   // Light
+    for _ in 0..<10 { night2.append(vrecHRV(nc, hr: 62, hrv: 45)); nc += 150 }   // REM
+    if cycle < 4 { for _ in 0..<2 { night2.append(bulkRec(nc, motion: 0x15, sub: 0x12)); nc += 150 } }
+}
+for _ in 0..<8 { night2.append(bulkRec(nc, motion: 0x14, sub: 0x12)); nc += 150 }
+let s = SleepStaging.summary(SleepStaging.classify(from: night2))
+check(s.deep > 0 && s.rem > 0 && s.light > 0 && s.awake > 0, "constructed night has all 4 stages")
+check(s.light > s.rem && s.rem > s.deep, "architecture sanity: Light ≫ REM > Deep")
+check(abs(s.inBed - (s.totalAsleep + s.awake)) < 150, "inBed ≈ asleep + awake (partition)")
+check(s.efficiency > 0.6 && s.efficiency <= 1.0, "plausible sleep efficiency")
+let m = s.minutes
+print("    => constructed night (min): inBed \(m.inBed), asleep \(m.asleep), "
+      + "awake \(m.awake), light \(m.light), deep \(m.deep), rem \(m.rem), eff \(Int(s.efficiency * 100))%")
+
 print(failures == 0 ? "\nALL CHECKS PASSED" : "\n\(failures) CHECK(S) FAILED")
 exit(failures == 0 ? 0 : 1)
