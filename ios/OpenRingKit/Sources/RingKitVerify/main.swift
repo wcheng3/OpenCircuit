@@ -95,6 +95,17 @@ check(DeviceStatus.steps(hex("8754030000510138013a00000000105402ff3a")) == 81,
       "step count also in 0x87 descriptor")
 check(DeviceStatus.steps(hex("15005b0ab0f4")) == nil, "non-descriptor frame -> nil steps")
 
+// --- Skin temperature from the 0x10/0x87 descriptor [6:8]/[8:10] (real frames, §5.4 🟢) ---
+let temp = DeviceStatus.skinTemperature(hex("104e0300000001630165000000001019 02ffaf".replacingOccurrences(of: " ", with: "")))
+check(temp?.channelA == 35.5 && temp?.channelB == 35.7,
+      "descriptor [6:10] -> 35.5/35.7 °C (🟢 morning, app avg 96.40 °F)")
+check(temp.map { abs($0.fahrenheit - 96.08) < 0.01 } == true, "skin temp -> 96.08 °F mean")
+check(DeviceStatus.skinTemperature(hex("105402000051011f012500000000105400ff96"))?.channelA == 28.7,
+      "just-donned ring reads ~28.7 °C (warming curve)")
+check(DeviceStatus.skinTemperature(hex("15005b0ab0f4")) == nil, "non-descriptor frame -> nil temp")
+check(DeviceStatus.skinTemperature(hex("104e0300000000000000000000001019 02ffaf".replacingOccurrences(of: " ", with: ""))) == nil,
+      "zero-temp descriptor -> nil (out of band)")
+
 // --- Epoch sync Layer A ---
 var ppgA = makeEpochRecord(size: EpochRecord.ppgRecordSize, counter: 0x000100)
 ppgA.replaceSubrange(9..<47, with: Array(repeating: UInt8(0xAA), count: 38))

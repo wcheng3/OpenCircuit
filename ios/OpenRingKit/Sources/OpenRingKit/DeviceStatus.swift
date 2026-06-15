@@ -8,11 +8,33 @@
 
 import Foundation
 
+/// Skin temperature decoded from a 0x10/0x87 descriptor (PROTOCOL.md §5.4 🟢).
+/// Two near-equal 16-bit channels (skin + reference); `celsius` is their mean.
+public struct SkinTemperature: Equatable, Sendable {
+    public let channelA: Double   // [6:8], °C
+    public let channelB: Double   // [8:10], °C
+    public var celsius: Double { (channelA + channelB) / 2 }
+    public var fahrenheit: Double { celsius * 9 / 5 + 32 }
+}
+
 public enum DeviceStatus {
     /// The ring's onboard step count from a 0x10/0x87 descriptor frame, or nil if the
     /// frame isn't one. The value can legitimately be 0 (no steps yet).
     public static func steps(_ frame: [UInt8]) -> Int? {
         guard frame.count >= 19, frame[0] == 0x10 || frame[0] == 0x87 else { return nil }
         return (Int(frame[4]) << 8) | Int(frame[5])
+    }
+
+    /// Skin temperature from a 0x10/0x87 descriptor: two 0.1 °C big-endian channels at
+    /// `[6:8]`/`[8:10]` (§5.4 🟢, ground-truthed 2026-06-15). The descriptor streams live
+    /// while connected — temperature is NOT in the 0x4c sleep sync. Returns nil if the
+    /// frame isn't a descriptor or the reading is outside a plausible band (filters
+    /// zero/garbage frames); a cold/just-donned ring still reads ~28 °C and is returned.
+    public static func skinTemperature(_ frame: [UInt8]) -> SkinTemperature? {
+        guard frame.count >= 19, frame[0] == 0x10 || frame[0] == 0x87 else { return nil }
+        let a = (Int(frame[6]) << 8) | Int(frame[7])
+        let b = (Int(frame[8]) << 8) | Int(frame[9])
+        guard (150...500).contains(a), (150...500).contains(b) else { return nil }  // 15–50 °C
+        return SkinTemperature(channelA: Double(a) / 10, channelB: Double(b) / 10)
     }
 }
