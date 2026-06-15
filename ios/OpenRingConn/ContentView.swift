@@ -8,6 +8,9 @@ struct ContentView: View {
     @State private var healthAuthorized = false
     @State private var lastWrite: String?
     @State private var showDebug = false
+    /// Last HR persisted to the store (from a prior session or a background refresh),
+    /// shown on launch before BLE reconnects. #14
+    @State private var lastKnownHR: QuantitySample?
 
     private let health = HealthKitWriter()
 
@@ -35,6 +38,8 @@ struct ContentView: View {
                 // Wire persistence into the scanner/session so the (currently gated)
                 // epoch-sync decoder can persist Layer-A records once enabled. #24
                 scanner.setLocalStore(LocalStore(modelContext))
+                // Surface the last persisted HR immediately, before BLE reconnects. #14
+                loadLaunchSnapshot()
             }
         }
     }
@@ -70,7 +75,9 @@ struct ContentView: View {
     private var hrCard: some View {
         card {
             metricHeader("HEART RATE", icon: "heart.fill", color: .red, active: hrActive())
-            bigReading(session?.liveHR, unit: "BPM", color: .red, active: hrActive())
+            // Fall back to the last persisted reading on launch / before reconnect. #14
+            bigReading(session?.liveHR ?? lastKnownHR.map { Int($0.value) },
+                       unit: "BPM", color: .red, active: hrActive())
 
             if hrActive() {
                 // Optical HR is a windowed average that climbs over ~20–60 s of stillness,
@@ -99,6 +106,9 @@ struct ContentView: View {
                 }
             } else if session?.liveHR != nil {
                 Text("Last reading — tap Measure to refresh.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            } else if lastKnownHR != nil {
+                Text("Last synced reading — connect to refresh.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
 
@@ -382,5 +392,24 @@ struct ContentView: View {
         case .connecting(let n): return "Connecting to \(n)…"
         case .connected(let n): return n
         }
+    }
+
+    // MARK: Background-refresh support (#14)
+
+    /// Load the last persisted HR so the UI can show it immediately on launch.
+    private func loadLaunchSnapshot() {
+        guard let snapshot = try? LaunchSnapshot.load(from: LocalStore(modelContext)) else { return }
+        lastKnownHR = snapshot.lastHeartRate
+    }
+
+    /// One-shot foreground refresh: read a live HR, persist it, and update the snapshot.
+    /// Mirrors what the background task does, for an on-demand pull.
+    private func refreshLiveHeartRate() async {
+        guard let hr = await scanner.readLiveHeartRate(timeout: 10) else { return }
+        let sample = QuantitySample(kind: .heartRate, start: Date(), value: Double(hr))
+        if let fresh = try? LocalStore(modelContext).ingest([sample]) {
+            try? await health.write(fresh)
+        }
+        loadLaunchSnapshot()
     }
 }

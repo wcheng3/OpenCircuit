@@ -152,6 +152,16 @@ struct LocalStore {
         return segments
     }
 
+    func latestSample(kind: MetricKind) throws -> QuantitySample? {
+        let kindRaw = kind.rawValue
+        var descriptor = FetchDescriptor<StoredSample>(
+            predicate: #Predicate { $0.kindRaw == kindRaw },
+            sortBy: [SortDescriptor(\.start, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        return try context.fetch(descriptor).first?.sample
+    }
+
     private func upsertCursor(kind: String, last: Date) {
         let descriptor = FetchDescriptor<StoredCursor>(
             predicate: #Predicate { $0.kindRaw == kind })
@@ -196,5 +206,13 @@ struct LocalStore {
         }
 
         return CumulativeMetricState(previousRawValue: previousRaw)
+    }
+}
+
+struct LaunchSnapshot {
+    let lastHeartRate: QuantitySample?
+
+    static func load(from store: LocalStore) throws -> LaunchSnapshot {
+        LaunchSnapshot(lastHeartRate: try store.latestSample(kind: .heartRate))
     }
 }

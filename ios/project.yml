@@ -30,6 +30,9 @@ targets:
         # Background sync while suspended (docs/HANDOFF_MACOS_IOS.md).
         UIBackgroundModes:
           - bluetooth-central
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.openringconn.app.bgrefresh
     # HealthKit entitlement intentionally OMITTED for free-team signing (it needs a
     # paid Apple Developer account, and setting CODE_SIGN_ENTITLEMENTS on a free team
     # breaks device launch — see git history). BLE works; HealthKit auth no-ops at
@@ -49,3 +52,15 @@ targets:
         # On-device signing. Xcode fills DEVELOPMENT_TEAM when you pick your team
         # (or set it here to your 10-char Team ID for CLI builds).
         CODE_SIGN_STYLE: Automatic
+
+  OpenRingConnTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: OpenRingConnTests
+    dependencies:
+      - target: OpenRingConn
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.openringconn.app.tests
+        SWIFT_VERSION: "5.9"
