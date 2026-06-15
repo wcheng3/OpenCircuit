@@ -303,18 +303,27 @@ struct LocalStore {
 
     /// Upsert the day's step count, keyed by start-of-day. The ring's onboard count only
     /// grows within a day, so keep the max for the day; a new day gets its own row.
-    func saveDailySteps(_ steps: Int, day: Date = Date()) throws {
-        guard steps > 0 else { return }
+    /// Accumulate a step DELTA into today's running total. The ring's onboard counter is a
+    /// since-handoff delta that RESETS (the official app sums the deltas in local memory), so
+    /// we sum observed deltas the same way rather than storing the raw counter. New day = new row.
+    func addDailySteps(_ delta: Int, day: Date = Date()) throws {
+        guard delta > 0 else { return }
         let dayStart = Calendar.current.startOfDay(for: day)
-        let descriptor = FetchDescriptor<StoredDaily>(
-            predicate: #Predicate { $0.day == dayStart })
+        let descriptor = FetchDescriptor<StoredDaily>(predicate: #Predicate { $0.day == dayStart })
         if let existing = try? context.fetch(descriptor).first {
-            existing.steps = max(existing.steps, steps)
+            existing.steps += delta
             existing.updatedAt = Date()
         } else {
-            context.insert(StoredDaily(day: dayStart, steps: steps))
+            context.insert(StoredDaily(day: dayStart, steps: delta))
         }
         try context.save()
+    }
+
+    /// Today's accumulated step total (0 if none yet).
+    func todaySteps(day: Date = Date()) throws -> Int {
+        let dayStart = Calendar.current.startOfDay(for: day)
+        let descriptor = FetchDescriptor<StoredDaily>(predicate: #Predicate { $0.day == dayStart })
+        return (try? context.fetch(descriptor).first)?.steps ?? 0
     }
 
     /// Most recent stored daily rollup (latest day), or nil.

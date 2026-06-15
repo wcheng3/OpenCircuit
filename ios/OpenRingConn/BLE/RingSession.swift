@@ -60,6 +60,8 @@ final class RingSession: NSObject {
     private(set) var syncStatus: String?
 
     private var bulkRecords: [BulkRecord] = []
+    private var lastRawSteps: Int?       // last raw descriptor [4:6] counter (for delta accumulation)
+    private var dailyStepsTotal = 0      // accumulated daily step total (mirrors StoredDaily)
     private var syncTask: Task<Void, Never>?
     private var syncDone = false        // 0x50 end-of-history seen
     private var syncQuietTicks = 0      // seconds since the last page arrived
@@ -180,7 +182,7 @@ final class RingSession: NSObject {
             let end = stagedSegments.map(\.end).max() ?? start
             try? localStore.saveSleepSummary(summary, night: start, inBedStart: start, inBedEnd: end)
         }
-        if let steps { try? localStore.saveDailySteps(steps) }
+        // Steps are accumulated live in didUpdateValue (addDailySteps) — nothing to do here.
     }
 
     /// Start (or switch) live monitoring in a single mode. Guarantees only one metric
@@ -230,8 +232,6 @@ final class RingSession: NSObject {
         if let hr = liveHR { last.append(QuantitySample(kind: .heartRate, start: now, value: Double(hr))) }
         if let spo2 = liveSpO2 { last.append(QuantitySample(kind: .spo2, start: now, value: Double(spo2) / 100)) }
         persist(last)
-        // Steps stream live over 0x10/0x87 — persist the latest so it survives disconnect.
-        if let steps { try? localStore?.saveDailySteps(steps) }
     }
 
     /// Pull stored history: open the sync session (cursor = everything) and fetch.
@@ -325,18 +325,25 @@ extension RingSession: CBPeripheralDelegate {
         let bytes = [UInt8](data)
         Task { @MainActor in
             self.lastFrame = data.map { String(format: "%02x", $0) }.joined(separator: " ")
-            // Ring step count rides the 0x10/0x87 descriptor [4:6] (§5.4). Frames with 0
-            // are interleaved noise, so take the running max (today's cumulative count).
-            // Surface the count once ANY steps descriptor has arrived — `steps` stays nil
-            // = "no data yet" and becomes 0 (not nil) the moment the ring reports while
-            // connected, so the dashboard shows "0" instead of "—" (the running max keeps
-            // a real count from being clobbered back to 0 by interleaved 0-frames).
-            if let s = DeviceStatus.steps(bytes) {
-                self.steps = max(self.steps ?? 0, s)
-                // Persist the live count so "Steps (today)" survives disconnect (StoredDaily
-                // upsert keeps the per-day max; no-ops on 0). VitalsTableView.effectiveSteps
-                // falls back to today's StoredDaily when not connected.
-                if let steps = self.steps { try? self.localStore?.saveDailySteps(steps) }
+            // The ring's onboard step counter (descriptor [4:6], §5.4) is a since-handoff DELTA that
+            // resets (the official app sums it in local memory). So accumulate observed deltas
+            // into a persistent daily total, reset-aware, rather than showing the raw counter
+            // (which reset to 0). NOTE: we only count steps while THIS app is connected, so the
+            // total lags the always-connected official app — but it never resets to 0.
+            if let v = DeviceStatus.steps(bytes) {
+                if lastRawSteps == nil {
+                    // First reading this session — recover today's accumulated total from the
+                    // store and use this counter as the baseline (don't retro-count unseen steps).
+                    dailyStepsTotal = (try? localStore?.todaySteps()) ?? 0
+                } else if let last = lastRawSteps {
+                    let delta = v >= last ? v - last : v   // v < last => ring reset; v is the new count
+                    if delta > 0 {
+                        dailyStepsTotal += delta
+                        try? localStore?.addDailySteps(delta)
+                    }
+                }
+                lastRawSteps = v
+                self.steps = dailyStepsTotal
             }
             // Skin temperature rides the same 0x10/0x87 descriptor (§5.4). It streams live
             // (~30–60 s) and is NOT in the sleep sync, so capture + persist it here.
