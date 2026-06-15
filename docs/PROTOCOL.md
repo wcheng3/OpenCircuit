@@ -307,6 +307,20 @@ Baseline `01` = "still", not "unworn".
 >   probing** (in progress). HR/HRV/SpO2 decode re-confirmed (sleep window low-HR 48–58 bpm,
 >   SpO2 dip to 89 %). Sleep stages remain app-computed (no stage byte) — Phase-5 classifier.
 
+> **2026-06-15 active probe from the Mac — BLOCKED at session-open (auth/nonce 🔴).**
+> Connected to the ring from the Mac (name-based discovery — macOS bleak can't match by MAC,
+> must scan by name prefix). Status works: `01 00 00`→`81`, `01 01 <x>`→`81 01`. But
+> **`02 00 FFFFFFFF <flag> 01 00` returns NO `82`** for any flag (`00/01/02/04/05/08`), and
+> `06 01 00`+`95 00 00` returns no `15` — the sync session never opens, no data flows. This
+> held even with a **previously-accepted** `01 01 31 82 67` (seen working at 21:52 and 10:33
+> the same day), so the `01 01` value **rotates/expires**; a stale one poisons the open. The
+> value never appears in any ring response (app-generated, not handed out) yet `31 82 67`
+> repeated across two sessions → likely a derived key, not random. **Conclusion:** Mac-side
+> metric probing (incl. the temp-flag hunt) is gated by the §4 session-open auth — must crack
+> the `01 01` derivation first, OR capture the official app's temp fetch (the app holds valid
+> auth). Temp is confirmed BLE-delivered but absent from the normal sync drain → its fetch is
+> a distinct, not-yet-triggered event.
+
 ### 5.4 `0x10` / `0x87` — fixed 19-byte descriptor
 `0x10` ← `d0 00 00` (also spontaneous ~30–60 s); `0x87` ← `07 00 00`. **Identical
 layout** (only `[0]` respid differs; `0x87` body == `0x10` body) → shared descriptor,
