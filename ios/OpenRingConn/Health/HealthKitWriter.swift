@@ -9,6 +9,13 @@ import OpenRingKit
 @MainActor
 final class HealthKitWriter {
     private let store = HKHealthStore()
+    /// Reentrancy guard for `flushToHealth`: the method suspends on each HealthKit `save`,
+    /// and it's triggered from several UI/lifecycle points — without this, two overlapping
+    /// flushes could both read the same pending set before either advanced its watermark and
+    /// double-write to Health. STATIC so it serializes across the separate foreground and
+    /// background-task `HealthKitWriter` instances too (both run on the MainActor, which reads/
+    /// writes this synchronously around the awaits — they share one underlying SQLite store).
+    private static var isFlushing = false
 
     static var isAvailable: Bool { HKHealthStore.isHealthDataAvailable() }
 
@@ -51,6 +58,59 @@ final class HealthKitWriter {
         set.insert(HKQuantityType(.basalEnergyBurned))
         set.insert(HKCategoryType(.sleepAnalysis))
         return set
+    }
+
+    /// True once the user has granted share access (probed on heart rate as a representative
+    /// type). Lets the app auto-flush to Health without a button tap, while staying silent
+    /// when access was never granted. (HealthKit hides READ status for privacy, but SHARE
+    /// status is reportable.)
+    var isShareAuthorized: Bool {
+        Self.isAvailable
+            && store.authorizationStatus(for: HKQuantityType(.heartRate)) == .sharingAuthorized
+    }
+
+    /// What a `flushToHealth` pass actually wrote (for a status line); all-zero when there
+    /// was nothing pending or share access isn't granted.
+    struct FlushResult: Equatable {
+        var samples = 0, sleepSegments = 0, steps = 0
+        var wroteAnything: Bool { samples > 0 || sleepSegments > 0 || steps > 0 }
+    }
+
+    /// Mirror everything pending into Apple Health in one pass — scalar vitals, the night's
+    /// sleep, and today's step delta — each gated by its own watermark so nothing double-
+    /// writes. No-op (and advances no watermark) when share access isn't granted, so the
+    /// data backfills on the first flush after the user authorizes. Best-effort: a failure
+    /// on one metric doesn't block the others or advance its watermark.
+    @discardableResult
+    func flushToHealth(store: LocalStore, sleepSegments: [SleepSegment] = []) async -> FlushResult {
+        var result = FlushResult()
+        guard isShareAuthorized, !Self.isFlushing else { return result }
+        Self.isFlushing = true
+        defer { Self.isFlushing = false }
+
+        // Scalars: write, THEN advance the watermark, so a failed save backfills next time.
+        if let pending = try? store.pendingHealthSamples(), !pending.isEmpty {
+            do { try await write(pending); try store.markHealthWritten(pending); result.samples = pending.count }
+            catch { /* leave the watermark; retry next flush */ }
+        }
+        // Sleep: same write-then-mark order (a failed save must not lose the night).
+        if let pendingSleep = try? store.pendingHealthSleep(sleepSegments), !pendingSleep.isEmpty {
+            do { try await write(sleep: pendingSleep); try store.markSleepWritten(pendingSleep); result.sleepSegments = pendingSleep.count }
+            catch { /* leave the .sleep cursor; retry next flush */ }
+        }
+        // Steps: the store holds the authoritative pending delta (total − already-written), so
+        // gate on it directly — no live reading needed (this also lets a launch-time flush push
+        // steps the background refresh persisted). HealthKit SUMS stepCount, so writing the
+        // delta lands the day on the running total, not a re-add.
+        if let delta = try? store.pendingStepDelta(), delta > 0 {
+            let startOfDay = Calendar.current.startOfDay(for: Date())
+            do {
+                try await write([QuantitySample(kind: .steps, start: startOfDay, end: Date(), value: Double(delta))])
+                try store.advanceStepsWritten(by: delta)
+                result.steps = delta
+            } catch { /* leave the watermark; retry next flush */ }
+        }
+        return result
     }
 
     func requestAuthorization() async throws {

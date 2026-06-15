@@ -2,6 +2,12 @@ import Foundation
 import CoreBluetooth
 import Observation
 import OpenRingKit
+import os
+
+/// Unified-logging channel for the BLE/sync path. Stream live from a connected device with:
+///   log stream --device --predicate 'subsystem == "com.dreamality.openringconn"'
+/// (Logger reaches the unified log; plain `print` on iOS does not.)
+let ringLog = Logger(subsystem: "com.dreamality.openringconn", category: "ring")
 
 // An active link to a connected ring: discovers the notify/write characteristics
 // by UUID, enables notifications, sends commands, and decodes responses through
@@ -277,6 +283,7 @@ final class RingSession: NSObject {
         syncQuietTicks = 0
         syncing = true
         syncStatus = nil
+        ringLog.notice("sync: START (cursor=all)")
         syncTask = Task { [weak self] in
             // Paced enter so CoreBluetooth doesn't drop writes.
             for cmd in [Command.status0, Command.status1, Command.syncAll, Command.fetch] {
@@ -284,12 +291,18 @@ final class RingSession: NSObject {
                 self.write(cmd)
                 try? await Task.sleep(for: .milliseconds(300))
             }
-            // Watchdog: finalize on 0x50, or when pages stop (4 s quiet), or a 45 s cap —
-            // so the sync can never hang if the end-marker or a write is lost.
+            // Watchdog: finalize on 0x50, or when pages stop (3 s quiet), or a 45 s cap —
+            // so the sync can never hang if the end-marker or a write is lost. The common
+            // case (ring sends 0x50) exits immediately; the quiet fallback only fires when
+            // the end-marker is lost, and pages stream sub-second apart during a real drain,
+            // so 3 s of silence reliably means "done" — a second shaved off every such sync.
             for tick in 0 ..< 45 {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self else { return }
-                if self.syncDone || self.syncQuietTicks >= 4 { break }
+                if self.syncDone || self.syncQuietTicks >= 3 {
+                    ringLog.notice("sync: watchdog exit at \(tick)s (done=\(self.syncDone), quiet=\(self.syncQuietTicks), records=\(self.bulkRecords.count))")
+                    break
+                }
                 _ = tick
             }
             self?.finalizeSync()
@@ -305,6 +318,7 @@ final class RingSession: NSObject {
         persistSleepAndSteps()    // sleep summary + steps for offline display
         syncing = false
         syncTask = nil
+        ringLog.notice("sync: FINALIZE records=\(self.bulkRecords.count) samples=\(self.historySamples.count) sleepSegs=\(self.sleepSegments.count) steps=\(self.steps ?? -1)")
         if !bulkRecords.isEmpty {
             syncStatus = "Synced \(bulkRecords.count) epochs"
         } else if steps != nil {
@@ -318,8 +332,12 @@ final class RingSession: NSObject {
     }
 
     private func write(_ bytes: [UInt8]) {
-        guard let writeChar else { return }
+        guard let writeChar else {
+            ringLog.warning("write DROPPED (no writeChar yet): \(bytes.map { String(format: "%02x", $0) }.joined(separator: " "), privacy: .public)")
+            return
+        }
         // Write char advertises `write` (with response).
+        ringLog.debug("→ write \(bytes.map { String(format: "%02x", $0) }.joined(separator: " "), privacy: .public)")
         peripheral.writeValue(Data(bytes), for: writeChar, type: .withResponse)
     }
 }
@@ -344,6 +362,7 @@ extension RingSession: CBPeripheralDelegate {
                 }
             }
             self.ready = (self.notifyChar != nil && self.writeChar != nil)
+            ringLog.notice("ready=\(self.ready) (notify=\(self.notifyChar != nil), write=\(self.writeChar != nil))")
             if self.ready { self.startKeepalive() }   // begin continuous descriptor polling (primary tracker)
         }
     }
@@ -388,6 +407,7 @@ extension RingSession: CBPeripheralDelegate {
             case 0x47:
                 self.drainSawPage = true
                 if self.syncing { self.syncQuietTicks = 0 }
+                ringLog.debug("← 0x47 PPG page (\(bytes.count)B), ack")
                 self.write(Command.pageAck47)
                 self.handlePPGPage(data)   // Layer-A epoch decode, gated (#24)
                 return   // PPG page — BulkSleep decode TODO (issue #8)
@@ -397,6 +417,7 @@ extension RingSession: CBPeripheralDelegate {
                     self.bulkRecords += BulkSleep.records(fromPage: bytes)
                     self.syncQuietTicks = 0
                 }
+                ringLog.debug("← 0x4c sleep page (\(bytes.count)B) → records=\(self.bulkRecords.count), ack")
                 self.write(Command.pageAck4C)
                 self.handleActivityPage(data)   // Layer-A epoch decode, gated (#24)
                 return   // always ack to keep draining
@@ -405,6 +426,7 @@ extension RingSession: CBPeripheralDelegate {
                 // reaches Frame.parse. Mark done; the sync watchdog / live-enter drain finalizes.
                 self.drainDone = true
                 if self.syncing { self.syncDone = true }
+                ringLog.notice("← 0x50 END-OF-HISTORY (records=\(self.bulkRecords.count))")
                 self.handleEndOfHistory(data)   // finalize epoch session, gated persist (#24)
                 return
             default: break
@@ -425,6 +447,14 @@ extension RingSession: CBPeripheralDelegate {
                 }
                 if let spo2 = LiveHR.decodeSpO2(bytes) { self.liveSpO2 = spo2 }  // long frame, 🟡
             }
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
+                                didWriteValueFor characteristic: CBCharacteristic,
+                                error: Error?) {
+        if let error {
+            ringLog.error("write FAILED: \(error.localizedDescription, privacy: .public)")
         }
     }
 

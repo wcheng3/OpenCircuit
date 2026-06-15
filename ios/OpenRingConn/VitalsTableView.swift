@@ -135,17 +135,18 @@ struct VitalsTableView: View {
         if let s = session?.liveSpO2 { return "\(s) %" }
         return valueText(.spo2) { "\(Int(($0 * 100).rounded())) %" }
     }
-    // MARK: Skin temp (overnight headline; daytime live value is noisy, shown only as "now")
+    // MARK: Skin temp (headline = latest reading; overnight average shown as context)
 
-    /// Skin Temp row. The headline is the OVERNIGHT average (skin temp is noisy during the
-    /// day from ambient/activity), never the live daytime value. When connected we still
-    /// show the live reading as a small secondary line, clearly labeled "now".
+    /// Skin Temp row. The headline always shows the LATEST reading — the live value when
+    /// connected, else the most recent stored sample. The ring only polls skin temp overnight
+    /// (unless it sends one unsolicited), so the latest reading is normally last night's, which
+    /// is what we want on top during the day. The overnight average rides the secondary caption.
     private var skinTempRow: some View {
         HStack {
             Text("Skin Temp").font(.subheadline).foregroundStyle(.primary)
             Spacer()
             VStack(alignment: .trailing, spacing: 1) {
-                Text(nightTemp.map(tempString) ?? "—")
+                Text(latestTemp.map(tempString) ?? "—")
                     .font(.subheadline.weight(.semibold)).monospacedDigit()
                 if let secondary = skinTempSecondary {
                     Text(secondary).font(.caption2).foregroundStyle(.secondary)
@@ -155,20 +156,30 @@ struct VitalsTableView: View {
         .padding(.vertical, 8)
     }
 
-    /// Secondary caption under the Skin Temp headline: "overnight" when we have a night
-    /// average, plus the live value as "now …" when actively connected.
+    /// Latest skin-temp reading for the headline: the live value when connected, else the most
+    /// recent stored sample (ignoring zero/invalid placeholders), or nil if we have none.
+    private var latestTemp: Double? {
+        if let live = session?.liveTemperature { return live }
+        return latest[.temperature].map(\.value).flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    /// Secondary caption under the Skin Temp headline: how fresh the headline reading is
+    /// ("live" when connected, else relative time) and the overnight average for context.
     private var skinTempSecondary: String? {
-        let now = session?.liveTemperature.map { "now \(tempString($0))" }
-        switch (nightTemp != nil, now) {
-        case (true, let now?):  return "overnight · \(now)"
-        case (true, nil):       return "overnight"
-        case (false, let now?): return now
-        case (false, nil):      return nil
+        var parts: [String] = []
+        if session?.liveTemperature != nil {
+            parts.append("live")
+        } else if latestTemp != nil, let s = latest[.temperature] {
+            parts.append(Self.rel.localizedString(for: s.start, relativeTo: Date()))
         }
+        if let night = nightTemp {
+            parts.append("overnight \(tempString(night))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// Average skin temp (°C) over the most recent NIGHT window, or nil if that window has
-    /// no temperature samples (then the headline shows "—", never the noisy daytime value).
+    /// no temperature samples (then the secondary caption simply omits the overnight figure).
     /// Window: the latest stored sleep summary's span (night..night+inBed) when available,
     /// else local 00:00–06:00 of the most recent date that has temperature samples.
     private var nightTemp: Double? {

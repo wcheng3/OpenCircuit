@@ -168,18 +168,30 @@ final class RingScanner: NSObject {
         reconnectKnownPeripheral()   // re-arm the standing pending connect (no scan)
     }
 
-    /// Bounded one-shot live-HR read for the background-refresh task: scan/connect,
-    /// start HR monitoring, and return the first reading (or nil on timeout). Always
-    /// disconnects on the way out so the link isn't held open in the background.
-    func readLiveHeartRate(timeout: TimeInterval) async -> Int? {
+    /// What a bounded background read captured. `startMonitoring(.hr)` first drains the
+    /// ring's history backlog to completion (overnight HR/HRV/SpO2 → the store, plus the
+    /// sleep segments + step/temp descriptor) BEFORE it can poll a live HR, so even when the
+    /// live HR never locks we still come away with last night's data. `gotData` is the
+    /// BGTask success flag — true if we captured anything worth persisting, not just an HR.
+    struct BackgroundCapture {
+        var heartRate: Int?
+        var sleepSegments: [SleepSegment] = []
+        var steps: Int?
+        var gotData: Bool { heartRate != nil || !sleepSegments.isEmpty || (steps ?? 0) > 0 }
+    }
+
+    /// Bounded one-shot background read: reconnect (no-scan by identifier, else a
+    /// service-filtered scan), drain + decode the ring's history, and snapshot it for the
+    /// caller to mirror into Apple Health. Always tears the link down (re-arming the standing
+    /// reconnect) on the way out so nothing is held open in the background.
+    func captureForBackground(timeout: TimeInterval) async -> BackgroundCapture {
         let deadline = Date().addingTimeInterval(timeout)
         var didStart = false
-        // Prefer a no-scan reconnect-by-identifier (works in the background); only fall back
-        // to the service-filtered scan if we've never connected to a ring before.
         if !reconnectKnownPeripheral() {
             start(services: Self.backgroundScanServices)
         }
 
+        var capture = BackgroundCapture()
         defer { endBackgroundReadRearming() }
 
         while !Task.isCancelled && Date() < deadline {
@@ -188,9 +200,11 @@ final class RingScanner: NSObject {
                     session.startMonitoring(mode: .hr)
                     didStart = true
                 }
-                if let liveHR = session.liveHR {
-                    return liveHR
-                }
+                // Snapshot the decoded history as it lands; the drain completes before the
+                // first live HR, so this captures sleep/steps even if HR never locks.
+                if !session.sleepSegments.isEmpty { capture.sleepSegments = session.sleepSegments }
+                if let s = session.steps { capture.steps = s }
+                if let liveHR = session.liveHR { capture.heartRate = liveHR; break }
             } else if case .idle = state {
                 if !reconnectKnownPeripheral() {
                     start(services: Self.backgroundScanServices)
@@ -198,7 +212,14 @@ final class RingScanner: NSObject {
             }
             try? await Task.sleep(for: .seconds(1))
         }
-        return nil
+        // Final snapshot before teardown, in case we exited on the deadline after the drain
+        // completed but before a live HR arrived.
+        if let session {
+            if capture.sleepSegments.isEmpty { capture.sleepSegments = session.sleepSegments }
+            if capture.steps == nil { capture.steps = session.steps }
+            if capture.heartRate == nil { capture.heartRate = session.liveHR }
+        }
+        return capture
     }
 }
 

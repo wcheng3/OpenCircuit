@@ -142,11 +142,17 @@ final class StoredDaily {
     @Attribute(.unique) var day: Date = Date.distantPast
     var steps: Int = 0
     var updatedAt: Date = Date.distantPast
+    /// Running step total already written to Apple Health for this day. The next Health
+    /// write pushes only `steps - healthWrittenSteps` as a stepCount sample, so HealthKit
+    /// (which SUMS stepCount) lands on the daily total instead of overcounting on every
+    /// sync. Defaulted for lightweight migration of stores written before this column.
+    var healthWrittenSteps: Int = 0
 
-    init(day: Date, steps: Int = 0, updatedAt: Date = Date()) {
+    init(day: Date, steps: Int = 0, updatedAt: Date = Date(), healthWrittenSteps: Int = 0) {
         self.day = day
         self.steps = steps
         self.updatedAt = updatedAt
+        self.healthWrittenSteps = healthWrittenSteps
     }
 }
 
@@ -156,11 +162,13 @@ struct LocalStore {
 
     init(_ context: ModelContext) { self.context = context }
 
-    /// Rebuild the in-memory SyncCursor from persisted rows.
+    /// Rebuild the in-memory SyncCursor from persisted rows. Skips the `hk:`-prefixed
+    /// HealthKit-watermark rows (see `pendingHealthSamples`) — they live in the same table
+    /// but track a separate concern and must not pollute the store-ingest cursor.
     func loadCursor() throws -> SyncCursor {
         let rows = try context.fetch(FetchDescriptor<StoredCursor>())
         var map: [String: Date] = [:]
-        for r in rows { map[r.kindRaw] = r.last }
+        for r in rows where !r.kindRaw.hasPrefix(Self.healthCursorPrefix) { map[r.kindRaw] = r.last }
         return SyncCursor(lastByKind: map)
     }
 
@@ -219,21 +227,6 @@ struct LocalStore {
         return ingested
     }
 
-    /// Gate a night's sleep segments on the `.sleep` cursor so re-syncs don't
-    /// duplicate. Returns the segments to write (empty if this night is already
-    /// synced), advancing the cursor to the latest segment end.
-    func ingestSleep(_ segments: [SleepSegment]) throws -> [SleepSegment] {
-        guard let latest = segments.map(\.end).max() else { return [] }
-        var cursor = try loadCursor()
-        guard cursor.isNew(.sleep, latest) else { return [] }
-        cursor.advance(.sleep, to: latest)
-        if let last = cursor.last(.sleep) {
-            upsertCursor(kind: MetricKind.sleep.rawValue, last: last)
-        }
-        try context.save()
-        return segments
-    }
-
     /// Stored samples of one kind within `[start, end)`, oldest→newest. Used by the
     /// dashboard to average overnight skin-temperature samples (which only exist while the
     /// ring was connected) over a night window.
@@ -256,11 +249,89 @@ struct LocalStore {
         return try context.fetch(descriptor).first?.sample
     }
 
+    // MARK: HealthKit write watermark (decoupled from the store-ingest cursor)
+    //
+    // The store-ingest cursor (`ingest`) dedupes ROWS in the local store so the dashboard
+    // never double-counts a re-synced night. Apple Health needs its OWN high-water mark:
+    // previously both shared one cursor, so the dashboard's auto-persist advanced it before
+    // the Health write could claim the samples — HR/HRV/SpO2/respiratory/temperature were
+    // persisted for the dashboard but NEVER reached Apple Health. This watermark reads from
+    // the store (the single source of truth the auto-persist fills) and only advances after
+    // a confirmed write, so an un-authorized or failed write safely backfills next time.
+
+    /// Non-cumulative scalar metrics mirrored into Apple Health straight from the store.
+    /// (Sleep uses `pendingHealthSleep`/`markSleepWritten`; cumulative step/energy counters
+    /// take their own paths.)
+    static let healthMirroredKinds: [MetricKind] = [.heartRate, .hrvSDNN, .spo2, .respiratoryRate, .temperature]
+    private static let healthCursorPrefix = "hk:"
+
+    /// Stored samples of the Health-mirrored kinds newer than the Health watermark,
+    /// oldest→newest — everything synced to the store but not yet written to Apple Health.
+    /// Does NOT advance the watermark (call `markHealthWritten` after a successful write).
+    func pendingHealthSamples() throws -> [QuantitySample] {
+        let cursor = try loadHealthCursor()
+        var out: [QuantitySample] = []
+        for kind in Self.healthMirroredKinds {
+            let kindRaw = kind.rawValue
+            let last = cursor.last(kind) ?? .distantPast
+            let descriptor = FetchDescriptor<StoredSample>(
+                predicate: #Predicate { $0.kindRaw == kindRaw && $0.start > last && $0.value > 0 },
+                sortBy: [SortDescriptor(\.start, order: .forward)])
+            out += try context.fetch(descriptor).compactMap(\.sample)
+        }
+        return out.sorted { $0.start < $1.start }
+    }
+
+    /// Sleep segments for a night not yet mirrored to Apple Health, gated on the `.sleep`
+    /// cursor — WITHOUT advancing it (call `markSleepWritten` only after a confirmed write,
+    /// so a failed save backfills next time instead of losing the night). Returns `[]` when
+    /// this night is already in Health.
+    func pendingHealthSleep(_ segments: [SleepSegment]) throws -> [SleepSegment] {
+        guard let latest = segments.map(\.end).max() else { return [] }
+        let cursor = try loadCursor()
+        return cursor.isNew(.sleep, latest) ? segments : []
+    }
+
+    /// Advance the `.sleep` cursor past the night just written to Apple Health.
+    func markSleepWritten(_ segments: [SleepSegment]) throws {
+        guard let latest = segments.map(\.end).max() else { return }
+        var cursor = try loadCursor()
+        guard cursor.isNew(.sleep, latest) else { return }
+        cursor.advance(.sleep, to: latest)
+        if let last = cursor.last(.sleep) {
+            upsertCursor(kind: MetricKind.sleep.rawValue, last: last)
+        }
+        try context.save()
+    }
+
+    /// Advance the Health watermark past the newest written sample per kind.
+    func markHealthWritten(_ samples: [QuantitySample]) throws {
+        guard !samples.isEmpty else { return }
+        var cursor = try loadHealthCursor()
+        _ = cursor.selectNew(samples)   // advances per kind to the newest start
+        for kind in Self.healthMirroredKinds {
+            guard let last = cursor.last(kind) else { continue }
+            upsertCursor(kind: Self.healthCursorPrefix + kind.rawValue, last: last)
+        }
+        try context.save()
+    }
+
+    /// Health watermark, read from the `hk:`-prefixed cursor rows (keyed by bare kind).
+    private func loadHealthCursor() throws -> SyncCursor {
+        let rows = try context.fetch(FetchDescriptor<StoredCursor>())
+        var map: [String: Date] = [:]
+        for r in rows where r.kindRaw.hasPrefix(Self.healthCursorPrefix) {
+            map[String(r.kindRaw.dropFirst(Self.healthCursorPrefix.count))] = r.last
+        }
+        return SyncCursor(lastByKind: map)
+    }
+
     // MARK: Sleep summary + daily steps (offline dashboard, separate from `ingest`)
 
     /// Upsert the nightly sleep summary, keyed by start-of-day of `night`. Re-syncing the
     /// same night overwrites the existing row rather than inserting a duplicate. Does NOT
-    /// touch the SyncCursor — gating sleep history for HealthKit stays in `ingestSleep`.
+    /// touch the SyncCursor — gating sleep history for HealthKit stays in the `.sleep`
+    /// watermark (`pendingHealthSleep`/`markSleepWritten`).
     func saveSleepSummary(_ summary: SleepStaging.Summary, night: Date,
                           inBedStart: Date, inBedEnd: Date) throws {
         let dayStart = Calendar.current.startOfDay(for: night)
@@ -324,6 +395,28 @@ struct LocalStore {
         let dayStart = Calendar.current.startOfDay(for: day)
         let descriptor = FetchDescriptor<StoredDaily>(predicate: #Predicate { $0.day == dayStart })
         return (try? context.fetch(descriptor).first)?.steps ?? 0
+    }
+
+    /// Steps accumulated today but not yet written to Apple Health (0 if none/caught up).
+    /// Pairs with `advanceStepsWritten` so the day's stepCount reaches Health as deltas that
+    /// sum to the daily total, never the full total re-added on every sync.
+    func pendingStepDelta(day: Date = Date()) throws -> Int {
+        let dayStart = Calendar.current.startOfDay(for: day)
+        let descriptor = FetchDescriptor<StoredDaily>(predicate: #Predicate { $0.day == dayStart })
+        guard let row = try? context.fetch(descriptor).first else { return 0 }
+        return max(row.steps - row.healthWrittenSteps, 0)
+    }
+
+    /// Record that `delta` more of today's steps are now reflected in Apple Health. Advancing
+    /// by the delta just written (rather than to an external total) keeps the watermark exactly
+    /// in step with what was pushed, so the next `pendingStepDelta` is correct.
+    func advanceStepsWritten(by delta: Int, day: Date = Date()) throws {
+        guard delta > 0 else { return }
+        let dayStart = Calendar.current.startOfDay(for: day)
+        let descriptor = FetchDescriptor<StoredDaily>(predicate: #Predicate { $0.day == dayStart })
+        guard let row = try? context.fetch(descriptor).first else { return }
+        row.healthWrittenSteps = min(row.healthWrittenSteps + delta, row.steps)
+        try context.save()
     }
 
     /// Most recent stored daily rollup (latest day), or nil.

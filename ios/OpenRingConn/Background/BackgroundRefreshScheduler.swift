@@ -12,7 +12,7 @@ protocol BGTaskScheduling {
 extension BGTaskScheduler: BGTaskScheduling {}
 
 struct BackgroundRefreshScheduler {
-    static let identifier = "com.openringconn.app.bgrefresh"
+    static let identifier = "com.dreamality.openringconn.bgrefresh"
     static let refreshInterval: TimeInterval = 15 * 60
 
     private let scheduler: BGTaskScheduling

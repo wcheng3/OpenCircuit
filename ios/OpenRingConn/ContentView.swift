@@ -39,6 +39,7 @@ struct ContentView: View {
                     hrCard
                     spo2Card
                     stepsCard
+                    caloriesCard
                     syncCard
                     debugCard
                 }
@@ -46,6 +47,15 @@ struct ContentView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("OpenRingConn")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        UserProfileSettingsView()
+                    } label: {
+                        Image(systemName: "person.crop.circle")
+                    }
+                }
+            }
             .onAppear {
                 // Wire persistence into the scanner/session so the (currently gated)
                 // epoch-sync decoder can persist Layer-A records once enabled. #24
@@ -56,6 +66,10 @@ struct ContentView: View {
                 // SwiftData fetch synchronously in .onAppear blocked the launch render and
                 // showed a black screen on launch. #14
                 loadLaunchSnapshot()
+                // Reflect any prior Health authorization so the UI shows the mirrored state,
+                // and backfill anything the background refresh persisted while we were away.
+                healthAuthorized = health.isShareAuthorized
+                if healthAuthorized { flushHealth() }
             }
             // Foreground auto-refresh: reconnect to the last-known ring and pull fresh data
             // when the app becomes active, so opening it after a while shows updated vitals
@@ -66,6 +80,16 @@ struct ContentView: View {
             // Fire the armed one-shot sync the moment the (re)connected link is ready.
             .onChange(of: session?.ready) { _, ready in
                 if ready == true { maybeAutoSyncOnReady() }
+            }
+            // Seamless Apple Health mirroring: whenever a history sync finishes or live
+            // monitoring stops (both persist fresh samples to the store), push whatever's
+            // pending to Health. Each metric is watermark-gated, so this never double-writes
+            // and is a no-op until the user has authorized Health.
+            .onChange(of: session?.syncing) { _, syncing in
+                if syncing == false { flushHealth() }
+            }
+            .onChange(of: session?.monitoring) { _, monitoring in
+                if monitoring == false { flushHealth() }
             }
         }
     }
@@ -105,9 +129,16 @@ struct ContentView: View {
 
     private var connectionCard: some View {
         card {
-            HStack {
+            HStack(spacing: 8) {
                 Circle().fill(connected ? .green : .secondary).frame(width: 10, height: 10)
                 Text(statusText).font(.subheadline.weight(.medium))
+                // Top-of-screen freshness cue so opening the app reads as "updating" without
+                // scrolling to the sync card. Shows while the foreground auto-refresh (or a
+                // manual sync) is pulling fresh data.
+                if session?.syncing == true {
+                    ProgressView().controlSize(.small)
+                    Text("Updating…").font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 // Ring battery (a device stat, not a body vital) sits with the connection.
                 if let b = session?.batteryPercent {
@@ -244,6 +275,12 @@ struct ContentView: View {
         }
     }
 
+    /// Calories on the home page (was buried in the profile page). Headline is today's
+    /// estimated burn; the reference figures stay as a small secondary line.
+    private var caloriesCard: some View {
+        card { CaloriesCardView() }
+    }
+
     private func metricHeader(_ title: String, icon: String, color: Color, active: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon).foregroundStyle(active ? color : .secondary)
@@ -325,7 +362,7 @@ struct ContentView: View {
                     stageBar(staged)
                 }
                 Divider()
-                healthRow(samples)
+                healthRow
             }
         }
     }
@@ -354,11 +391,15 @@ struct ContentView: View {
         }
     }
 
-    private func healthRow(_ samples: [QuantitySample]) -> some View {
+    private var healthRow: some View {
         VStack(spacing: 8) {
             if !healthAuthorized {
                 Button {
-                    Task { try? await health.requestAuthorization(); healthAuthorized = true }
+                    Task {
+                        try? await health.requestAuthorization()
+                        healthAuthorized = health.isShareAuthorized
+                        flushHealth()   // backfill everything already in the store
+                    }
                 } label: {
                     Label("Authorize Apple Health", systemImage: "heart.text.square")
                         .frame(maxWidth: .infinity)
@@ -366,13 +407,11 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
                 .disabled(!HealthKitWriter.isAvailable)
             } else {
-                Button {
-                    writeToHealth(samples)
-                } label: {
-                    Label("Write to Apple Health", systemImage: "square.and.arrow.up")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent).tint(.pink)
+                // Mirroring is automatic after every sync; this is just a reassurance line
+                // plus a manual nudge for the impatient.
+                Label("Auto-syncing to Apple Health", systemImage: "checkmark.seal.fill")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
             if let lastWrite {
                 Text(lastWrite).font(.caption).foregroundStyle(.secondary)
@@ -398,12 +437,6 @@ struct ContentView: View {
                     ForEach(order, id: \.0) { stage, color, _ in
                         Rectangle().fill(color)
                             .frame(width: total > 0 ? geo.size.width * mins(stage) / total : 0)
-                    }
-                }
-
-                Section("Settings") {
-                    NavigationLink("User Profile") {
-                        UserProfileSettingsView()
                     }
                 }
             }
@@ -450,26 +483,19 @@ struct ContentView: View {
                 .fill(Color(.secondarySystemGroupedBackground)))
     }
 
-    private func writeToHealth(_ samples: [QuantitySample]) {
+    /// Push everything pending to Apple Health (scalars + sleep + step delta), each gated by
+    /// its own watermark so it never double-writes. Safe to call liberally — it's a no-op
+    /// until the user authorizes and whenever nothing is pending.
+    private func flushHealth() {
+        guard healthAuthorized else { return }
         let store = LocalStore(modelContext)
         let segments = session?.sleepSegments ?? []
-        let steps = session?.steps
         Task {
-            do {
-                let freshSamples = try store.ingest(samples)
-                try await health.write(freshSamples)
-                let freshSleep = try store.ingestSleep(segments)
-                if !freshSleep.isEmpty { try await health.write(sleep: freshSleep) }
-                // Steps: write today's cumulative count over [startOfDay, now].
-                if let steps, steps > 0 {
-                    let startOfDay = Calendar.current.startOfDay(for: Date())
-                    try await health.write([QuantitySample(kind: .steps, start: startOfDay,
-                                                           end: Date(), value: Double(steps))])
-                }
-                lastWrite = "Wrote \(freshSamples.count) samples, \(freshSleep.count) sleep segs"
-                    + (steps.map { ", \($0) steps" } ?? "")
-            } catch {
-                lastWrite = "Error: \(error.localizedDescription)"
+            let r = await health.flushToHealth(store: store, sleepSegments: segments)
+            if r.wroteAnything {
+                lastWrite = "Synced to Health: \(r.samples) samples"
+                    + (r.sleepSegments > 0 ? ", \(r.sleepSegments) sleep segs" : "")
+                    + (r.steps > 0 ? ", \(r.steps) steps" : "")
             }
         }
     }
@@ -492,15 +518,67 @@ struct ContentView: View {
         guard let snapshot = try? LaunchSnapshot.load(from: LocalStore(modelContext)) else { return }
         lastKnownHR = snapshot.lastHeartRate
     }
+}
 
-    /// One-shot foreground refresh: read a live HR, persist it, and update the snapshot.
-    /// Mirrors what the background task does, for an on-demand pull.
-    private func refreshLiveHeartRate() async {
-        guard let hr = await scanner.readLiveHeartRate(timeout: 10) else { return }
-        let sample = QuantitySample(kind: .heartRate, start: Date(), value: Double(hr))
-        if let fresh = try? LocalStore(modelContext).ingest([sample]) {
-            try? await health.write(fresh)
+/// Home-page calories card. Headline = today's estimated burn; secondary lines break it
+/// into resting (BMR prorated over the elapsed day) + active (Edwards-TRIMP from today's
+/// measured HR), then the static BMR/max-HR reference figures. Body inputs (age/weight/
+/// height/sex) still come from the profile page — the ring transmits none of them.
+struct CaloriesCardView: View {
+    // Shared @AppStorage keys with UserProfileSettingsView (single source of truth).
+    @AppStorage("userProfile.age") private var age = 35
+    @AppStorage("userProfile.weightKg") private var weightKg = 70.0
+    @AppStorage("userProfile.heightCm") private var heightCm = 170.0
+    @AppStorage("userProfile.sex") private var sexRaw = BiologicalSex.male.rawValue
+
+    /// Today's HR samples (for the active-calorie TRIMP estimate). Predicate-limited to
+    /// heart rate since start-of-day so the fetch stays small.
+    @Query private var hrSamples: [StoredSample]
+
+    init() {
+        let hr = MetricKind.heartRate.rawValue
+        let dayStart = Calendar.current.startOfDay(for: Date())
+        _hrSamples = Query(
+            filter: #Predicate { $0.kindRaw == hr && $0.start >= dayStart },
+            sort: \.start)
+    }
+
+    private var profile: UserProfile {
+        UserProfile(age: age, weightKg: max(weightKg, 1), heightCm: max(heightCm, 1),
+                    sex: BiologicalSex(rawValue: sexRaw) ?? .male)
+    }
+    private var maxHR: Int { max(220 - age, 1) }
+
+    /// Resting kcal accrued so far today: full-day BMR scaled by the elapsed fraction of today.
+    private var restingToday: Double {
+        let dayStart = Calendar.current.startOfDay(for: Date())
+        let fraction = Date().timeIntervalSince(dayStart) / 86_400
+        return Calories.bmrKcalPerDay(profile: profile) * fraction
+    }
+    /// Active kcal from today's measured HR (0 until HR is measured — it's sparse, so this
+    /// is a rough floor, not a continuous-wear estimate).
+    private var activeToday: Double {
+        let samples = hrSamples.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+        return Calories.activeKcal(hrSamples: samples, maxHR: maxHR)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "flame.fill").foregroundStyle(.orange)
+                Text("CALORIES").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("\(Int((restingToday + activeToday).rounded()))")
+                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                    .monospacedDigit().contentTransition(.numericText())
+                Text("kcal today").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+            }
+            Text("resting \(Int(restingToday.rounded())) · active \(Int(activeToday.rounded()))")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("BMR \(Int(Calories.bmrKcalPerDay(profile: profile).rounded())) kcal/day · max HR \(maxHR) bpm")
+                .font(.caption2).foregroundStyle(.secondary)
         }
-        loadLaunchSnapshot()
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
