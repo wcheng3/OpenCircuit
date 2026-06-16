@@ -27,12 +27,15 @@ final class HealthKitWriter {
         case .restingHeartRate: id = .restingHeartRate
         case .hrvSDNN: id = .heartRateVariabilitySDNN
         case .spo2: id = .oxygenSaturation
-        // Skin temp is captured ONLY during the nightly sleep window (RingSession), so the
-        // sleeping-wrist type is the semantically correct destination — it's what Apple's own
-        // sleep apps and Bevel's wrist-temp baseline read. `.bodyTemperature` is a clinical
-        // oral/core type and would pollute that chart with skin values ~5°C low (#29). iOS 16+;
-        // deployment target is iOS 17. Units stay °C (see `unit(for:)`).
-        case .temperature: id = .appleSleepingWristTemperature
+        // Skin temp is captured ONLY during the nightly sleep window (RingSession), so a
+        // rest-oriented type is the right home — NOT clinical `.bodyTemperature`, whose chart a
+        // skin reading (~5 °C below oral/core) would pollute (#29). The ideal sleeping-wrist type
+        // (`.appleSleepingWristTemperature`) is Apple-COMPUTED and read-only for third parties:
+        // it can't be save()d, and putting it in the `toShare` set of `requestAuthorization`
+        // raises NSInvalidArgumentException, which would crash auth or — swallowed by the
+        // call-site `try?` — silently disable EVERY metric's writeback. So we use the writable,
+        // rest-scoped `.basalBodyTemperature` instead. Units stay °C (see `unit(for:)`).
+        case .temperature: id = .basalBodyTemperature
         case .respiratoryRate: id = .respiratoryRate
         case .steps: id = .stepCount
         case .activeEnergy: id = .activeEnergyBurned
@@ -138,7 +141,21 @@ final class HealthKitWriter {
         // Read sleepAnalysis so the iOS Sleep-schedule window (HealthKitSleepSchedule) works
         // the moment the HealthKit entitlement is enabled — no further auth change needed.
         // (No effect today: without the entitlement the request is a no-op, so it can't prompt.)
-        try await store.requestAuthorization(toShare: allTypes, read: [HKCategoryType(.sleepAnalysis)])
+        let read: Set<HKObjectType> = [HKCategoryType(.sleepAnalysis)]
+        // Every type in `allTypes` is deliberately third-party-WRITABLE (that's why `.temperature`
+        // maps to `.basalBodyTemperature`, not the read-only `.appleSleepingWristTemperature`) —
+        // an unshareable type here would poison the whole request. Defensive isolation: if the
+        // request still throws (a future/edge type the OS refuses to share), retry WITHOUT
+        // temperature so one bad type degrades to "temp not shared" instead of disabling share
+        // access for every metric. (A genuinely non-shareable Apple-computed type raises an Obj-C
+        // NSInvalidArgumentException this can't catch — which is exactly why we never list one.)
+        do {
+            try await store.requestAuthorization(toShare: allTypes, read: read)
+        } catch {
+            var writable = allTypes
+            if let temp = Self.quantityType(for: .temperature) { writable.remove(temp) }
+            try await store.requestAuthorization(toShare: writable, read: read)
+        }
     }
 
     /// Write scalar samples. Caller filters with SyncCursor first.
