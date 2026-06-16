@@ -362,6 +362,9 @@ struct ContentView: View {
                 lastWrite = "Synced to Health: \(r.samples) samples"
                     + (r.sleepSegments > 0 ? ", \(r.sleepSegments) sleep segs" : "")
                     + (r.steps > 0 ? ", \(r.steps) steps" : "")
+                    + (r.restingDays > 0 ? ", \(r.restingDays) resting HR" : "")
+                    + (r.passiveHours > 0 ? ", \(r.passiveHours)h basal" : "")
+                    + (r.activeKcal > 0 ? ", \(Int(r.activeKcal.rounded())) active kcal" : "")
             }
         }
     }
