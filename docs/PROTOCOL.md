@@ -127,18 +127,69 @@ Bulk frames (`0x47`/`0x4c`) pack fixed-size records, each prefixed by delimiter
 | Page ACK | `c7 00 00` / `cc 00 00` | `47`/`4c` | continue bulk transfer | 🟢 |
 | Status query | `d0 00 00` | `10`/`50` | session/record status | 🟡 |
 
-**The `02` arg is a sync CURSOR, not a timestamp** (🟢, this was the key unlock).
-Real-time values are *rejected* (no `82`); only a cursor **≥ the ring's last-synced
-position** is accepted. `02 00 FF FF FF FF 00 01 00` (max) always works and means
-"sync everything". The capture's `0c 22 98 c3` was the app's then-current cursor;
-replaying it now fails because the ring has since advanced past it.
+**The `02` arg is a sync CURSOR, not a timestamp** (🟢, this was the key unlock). The cursor
+is *seconds since 2019* (§5.6). ⚠️ **`02 00 FF FF FF FF 00 01 00` does NOT mean "sync
+everything"** — `FF FF FF FF` is a far-FUTURE position that does not pull history (see the
+load-bearing caveat below).
+
+**How the official app pulls history** (🟢 *for the app's observed behaviour*,
+`ppg_align_20260616` capture, 23 sync-opens via `desktop/analyze_cursor.py`): **the app opens
+at cursor ≈ NOW on every sync** — *never* `FF FF FF FF` — and that open **triggers a drain of
+everything the ring hasn't handed off, up to the ring's current time.** The cursor acts as a
+"drain up to ≈now" trigger, **NOT a hard bound**:
+- Records routinely **overshoot** the open cursor — in 11/23 syncs the last returned record is
+  *above* the open (by up to ~39 min): the drain takes minutes and epochs created *during* it
+  keep streaming past the frozen cursor. So this is **not** "counter ≤ C"; the cursor only has
+  to look like a plausible recent time to trigger the drain (an absurd-future cursor does not).
+- Each sync resumes where the previous ended: open `0c22bbf7` → `0c22a16b..0c22bb60`; next open
+  `0c233d95` → `0c22bbf6..0c233cdf`. The FIRST open (`0c2298c3`) drained ~19 days in one shot
+  (`0c099dbf..0c2299cd`). The ring tracks its **own** resume pointer; the app persists none.
+- The 23 opens increase monotonically and are **never** equal to the previous `0x50 to` →
+  consistent with "open at ≈now," not "resume from the last reported cursor." (The Δ between
+  opens is read from the cursor values, not measured against packet wall-clock.)
+- The `0x50` end-of-history `to` cursor **trails the last delivered record** (e.g. `to=0c2299c8`
+  vs last record `0c2299cd`), so consecutive syncs re-deliver a small overlap — hence the
+  cross-sync **dedup** in `LocalStore`/`SyncCursor` and `extract_last_night.py`.
+- The app **drains even when entering live HR** (`btsnoop_hr`: live entry opens `0c2298c3`,
+  cursor≈now, draining a 19-day backlog *before* HR mode). It has **no** "skip-backlog" open —
+  our `FF FF FF FF` live path (below) is a deliberate, *unverified* divergence.
+
+⚠️ **Load-bearing and NOT ground-truthed (🟡): what `FF FF FF FF` actually does.** The official
+app never sends it in any capture, so this is inferred:
+- "`FF FF FF FF` → empty" comes only from our `livehr.py` replay — which *also* reused a stale
+  `01 01` nonce (§ session-open nuances), a confound, so "empty" might be the nonce, not the
+  cursor. (The iOS broken-vs-fixed paths use the **same** hardcoded nonce and differ *only* in
+  the cursor, so the nonce does not confound the iOS fix itself.)
+- Whether `FF FF FF FF` **advances the ring's resume pointer** is unknown, and it matters:
+  `autoMeasure` fires `syncAll` (`FF FF FF FF`) every ~10 min all day, so a pointer-advancing
+  `syncAll` would shred the backlog before the overnight `syncUpToNow` runs. The 3-week backlog
+  *surviving* in this capture is *weak* evidence it does NOT advance (an all-day pointer-advancing
+  `syncAll` would have kept the ring empty) — weak because we can't confirm the app was connected
+  throughout. **TODO (ring required): A/B test — `syncAll`, then immediately `syncUpToNow`, and
+  confirm the backlog still drains.** Safest alternative: drop `syncAll` from the live path too and
+  open at cursor≈now with a short drain cap (app-faithful; removes the dependency entirely).
+
+**Contention (🟢 behaviourally — overnight data reached the official app, not us; the
+single-shared-pointer *mechanism* is inferred, not two-client tested):** the ring holds only
+UN-synced data behind what is almost certainly ONE shared resume pointer; whoever
+opens at ≈now first (the official app OR us) drains the backlog and advances it, leaving the other
+with nothing. (This is why overnight sleep "vanished" — even after the cursor fix, a competing
+official-app sync can still win the one-time backlog.)
+
+**The fix in OpenRingConn:** (1) history/overnight opens use `Command.syncUpToNow()`
+(cursor = `floor(now) − epoch`), exactly the app's history behaviour — this part is solid (the
+capture proves cursor≈now drains, and lower-bound is ruled out, so it can't return empty). (2)
+The live/quick path still uses `Command.syncAll` (`FF FF FF FF`) to skip the drain for a fast HR
+lock — **pending the A/B test above**; until verified, treat this as the one residual risk. (3)
+Be the **sole** syncer — stop running the official app, which races us for the one-time backlog.
+**No cursor is persisted on our side; the ring self-tracks.**
 
 **Verified live-HR sequence (from the Mac, `desktop/livehr.py`):**
 ```
 01 00 00                  -> 81 ..        (wake/status)
 01 01 31 82 67 00         -> 81 01 ..     (config table)
-02 00 FF FF FF FF 00 01 00 -> 82 ..       (open sync, cursor=all)
-07 00 00 + c7/cc acks     -> 87,47,4c ..  (drain any history backlog)
+02 00 FF FF FF FF 00 01 00 -> 82 ..       (open sync; FFFFFFFF → empty/skip-backlog 🟡, §3 caveat)
+07 00 00 + c7/cc acks     -> 87,47,4c ..  (empty under FFFFFFFF 🟡; history uses cursor≈now)
 06 01 00                  -> 86 00 86     (enter live-HR mode)
 07 00 00                  -> 15 ..        (first live sample)
 95 00 00  (repeat)        -> 15 00 <hr> 0a b0 <xor>   (one HR sample per poll)
@@ -153,8 +204,9 @@ disconnect (wake via charger contact or motion). Metric-specific sync commands
 > - `01 01 <3 bytes>` carries a per-session **nonce** (`31 82 67`, then `f0 1e 88`,
 >   `9c 61 91` across sessions). Our replays reused a stale nonce, so the session
 >   never opened — this, not just the cursor, is why Mac live-HR replay stalled.
-> - `02 00 <cursor:4> …` cursor advances each sync (`0c 22 98 c3` → `0c 22 bb f7`).
->   `FFFFFFFF` works only while a backlog exists.
+> - `02 00 <cursor:4> …` cursor ≈ now is a "drain up to now" trigger (NOT a hard bound; §3), advancing each sync
+>   (`0c 22 98 c3` → `0c 22 bb f7`). `FFFFFFFF` (far-future) returns an empty stream
+>   (skip-backlog); pull history at cursor ≈ now (§3).
 > The HR DECODE is confirmed (above); reproducing the live stream on demand from the
 > Mac needs the nonce + cursor derived correctly (source of the nonce still 🔴 —
 > likely from an `81` response field). Not required for Phase 1.
@@ -213,6 +265,16 @@ continuous trace); 30 samples per 900 s record ≈ 1/channel/min, so this is a
 perfusion/amplitude trend, not pulse-resolution waveform 🟡. Reproduce with
 `desktop/decode_ppg.py`.
 
+**2026-06-16 cross-check (`ppg_align_20260616`, issue #8) — 10-bit holds, but still not
+fiducial.** Decoding the 176 `0x47` records 10-bit BE is flat/low-jitter (smoothness 0.04)
+while 12-bit BE is noise-like (1.12) → consistent with the 10-bit choice above. BUT these
+records are scattered history (176 over ~21 days, not a worn realtime window), so they do
+**not** supply the proof #8 demands: confirming bit-width + channel identity (red/IR) +
+counter time-unit still needs a **realtime PPG capture with finger on/off + a reference HR
+over the same window** — i.e. the physical ring. `desktop/decode_0x47.py` does the mechanical
+decode (both widths → CSV); alignment is the open step. Per the no-fabrication rule, treat
+channel identity as 🟡 (jitter-supported, not fiducial) until that capture lands.
+
 ### 5.3 `0x4c` — bulk activity/sleep page (ACK each with `cc 00 00`)
 Page: `[0]`=`0x4c` · `[1]`=`00` · **`[2]`=remaining-RECORD countdown** (−6/page) ·
 body = 6×**23-byte records** · `[last]`=XOR. 🟢
@@ -232,8 +294,11 @@ time (no 12 h offset in this capture; bears on §5.6/§6.6). Reassemble + decode
 **Two record layouts**, distinguished by `[8]`:
 - **Activity/awake epoch** `[8]=0x12`/`0x13`: physiology/activity in `[15:22]`, motion
   in `[10:15]` elevated.
-- **Sleep-vitals epoch** `[8]=0x57–0x63` (87–99): per-epoch vitals in `[4:9]`, motion
-  `[10:15]` at `01` baseline, `[15:22]` ≈ zero.
+- **Sleep-vitals epoch**: per-epoch vitals in `[4:9]`, motion `[10:15]` at `01` baseline,
+  `[15:22]` ≈ zero. `[8]` is the **SpO2 %** (typically `0x57–0x63` = 87–99, but lower on a real
+  desaturation). ⚠️ Layout is decided **structurally** (#39), NOT by this band: classify as
+  sleep-vitals = "not the idle template AND `[8]` ∉ {`0x12`,`0x13`}", so a sub-87 % desaturation
+  still keeps its HR/HRV/SpO2 (the old value-gate dropped the whole epoch — see `BulkSleep.swift`).
 
 **Sleep-vitals fields — confirmed against the RingConn app's readout for the
 2026-06-13 night** (avg HR 68 / HRV 65 ms / SpO2 98 %, low 93 % ~02:30–03:00):
@@ -376,7 +441,11 @@ Host write `02 00 <cursor:4 BE> <flag:1> 01 00` → `82 00 00 82`.
 **cursor = 4-byte BE seconds since epoch `1577793600` (2019-12-31 12:00:00 UTC)** —
 3 (time,value) pairs + 2 in-frame cross-checks agree to <0.34 s; 1/sec, monotonic;
 same epoch as the record counters. Build current: `floor(unix_utc) − 1577793600`,
-BE, into `02 00 <BE4> 00 01 00`; `FF FF FF FF` = "everything" while backlog exists.
+BE, into `02 00 <BE4> 00 01 00`. ⚠️ `FF FF FF FF` is **not** "everything" — it's a far-future
+cursor that does not pull history (the live-HR "skip history" open; 🟡, see §3 "Load-bearing").
+A plausible-recent cursor acts as a **"drain up to ≈now" trigger, not a hard bound** (§3): open
+at cursor **≈ now** and the ring streams everything un-delivered up to its current time (records
+can overshoot the cursor by minutes), then self-advances its resume pointer.
 
 **No 12 h offset in decoded data 🟢 (issue #5 closed, `morning_temp_20260615`).**
 The epoch `1577793600` is 2019-12-31 **12:00:00** UTC (noon, not midnight): the 12 h
@@ -388,15 +457,22 @@ every case (max observed delta 0.5 s, median 0.2 s). No timezone-dependent offse
 
 ### 5.7 `0x81` — status replies (← `0x01`)
 **`81 00 XX YY`** (← `01 00 00`): `[2]` is the only varying byte, full 8-bit range,
->100 → **not battery %**; per-session nonce / ring-state token 🟡 (issue #4).
+>100 → **not battery %** 🟢; a **per-session token / nonce** 🟡 (issue #4 — see confirmation below).
 
 **Byte[2] analysis, 20 BLE sessions, `morning_temp_20260615_btsnoop.log` 🟢:**
 Values span 31–249 (range=218; full 8-bit), definitively not battery % (values >100
 common: 176, 218, 216, 203, 227, 249). Non-monotonic within an hour: 7 consecutive
 sessions at 13:28–13:52 UTC return 31→120→227→63→249→188→157→128 — no slow battery-like
 drift. Two connections using recycled handle 0x002 (separated by >15 h) return
-different values (176 vs 148). Consistent with **per-session ring-state assignment** or
-a random nonce; source unknown 🔴. Settle with a long wear/discharge battery test.
+different values (176 vs 148). **Cross-capture confirmation (🟢, 2026-06-16, issue #4,
+`desktop/analyze_0x81.py`):** byte[2] is **one value per BLE connection** — `battery76` (ring
+steady at 76 %) returns `176, 218, 216, 129, 203, 163, 176, 150, …` across ~20 connections,
+**constant within each** connection, full 8-bit range, recurring (`176` on two). So it is
+**neither battery (would sit ≈constant near 76 %) nor a sequential counter**: a **per-session
+token / nonce** — assigned once per connect — likely the same session-auth nonce family as the
+`01 01` arg (the `81 01` block below + § session-open nuances in §3). **Issue #4 answer: not
+battery 🟢; per-session token role 🟡.** (Battery is
+the `0x10`/`0x87` descriptor `[1]`, §5.4 🟢 — already decoded.)
 
 **`81 01 …`** (38 B, ← `01 01 <nonce>`): mostly constant; notable — `[27:32]`=
 `21 49 ac <XX> f4` (4/5 const, device-id-like) · `[34:36]`=16-bit monotonic counter
@@ -437,8 +513,9 @@ Each names the single capture that converts a 🟡/🔴 field into a decoded met
    activity/sleep/PPG sync, from `0x0900`, and from a capture with the Temperature screen
    open (that screen reads cache, no BLE). **Mac active-probing is ruled out** — data
    commands need a bond (§0). Remaining lead: a **from-scratch phone resync** — `adb shell
-   am force-stop com.gdjztech.ringconn`, reopen the app so it re-pulls history from cursor
-   0, and btsnoop that; a full resync may issue the temp fetch the incremental syncs skip.
+   am force-stop com.gdjztech.ringconn`, reopen the app so it does a fresh sync (it still opens
+   at cursor ≈ now per §3 — NOT cursor 0 — but drains whatever backlog accrued while stopped),
+   and btsnoop that; a large fresh drain may surface the temp fetch the small incremental syncs skip.
    Ground truth: `−0.16` deviation / `96.75 °F` (and `96.58 °F`/35.88 °C for 2026-06-13);
    expect an absolute near `3588`–`3597` (0.01 °C). Unblocks the
    `bodyTemperature`/`appleSleepingWristTemperature` HealthKit write.

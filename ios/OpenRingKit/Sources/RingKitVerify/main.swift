@@ -47,6 +47,11 @@ check(Array(Command.syncAll[2...5]) == [0xFF, 0xFF, 0xFF, 0xFF], "syncAll cursor
 check(Command.syncSince(unixSeconds: Command.syncEpoch + 0x0c2298c3)
       == [0x02, 0x00, 0x0c, 0x22, 0x98, 0xc3, 0x00, 0x01, 0x00],
       "syncSince builds 02 00 <cursor BE4> 00 01 00 (epoch 1577793600)")
+// History sync opens at cursor ≈ NOW (official app's behaviour §3) — never syncAll (0xFFFFFFFF,
+// far-future → empty backlog, the bug that dropped overnight sleep/HRV/RR).
+let nowOpen = Command.syncUpToNow(now: Date(timeIntervalSince1970: 1_750_000_000))
+check(nowOpen == Command.syncSince(unixSeconds: 1_750_000_000), "syncUpToNow = syncSince(now)")
+check(nowOpen != Command.syncAll, "syncUpToNow is NOT syncAll (0xFFFFFFFF)")
 for f in realFrames { check(Frame.isValid(hex(f)), "real frame validates: \(f)") }
 
 var bad = hex("8100b031"); bad[1] ^= 0xFF
@@ -236,9 +241,9 @@ let calorieSamples = (0..<600).map { offset in
 }
 check(abs(Calories.activeKcal(hrSamples: calorieSamples, maxHR: 180) - 150.0) < 0.001, "TRIMP 30 -> 150 kcal")
 
-// Sleep score (integer-ratio model, faithful to openwhoop)
+// Sleep score (graded floating-point ratio, #28 — NOT the openwhoop integer step)
 check(SleepScore.score(durationSeconds: 8 * 3600) == 100.0, "8h sleep -> 100")
-check(SleepScore.score(durationSeconds: 4 * 3600) == 0.0, "4h sleep -> 0 (integer ratio)")
+check(SleepScore.score(durationSeconds: 4 * 3600) == 50.0, "4h sleep -> 50 (graded ratio, #28)")
 check(SleepScore.score(durationSeconds: 24 * 3600) == 100.0, "24h sleep -> clamped 100")
 
 // Sleep detection (activity.rs)

@@ -80,6 +80,18 @@ final class FrameTests: XCTestCase {
         XCTAssertEqual(Array(Command.syncSince(unixSeconds: 0)[2...5]), [0, 0, 0, 0])
     }
 
+    func testSyncUpToNowOpensAtNowNotSyncAll() {
+        // History sync opens at cursor ≈ now (the official app's behaviour, §3) — NEVER syncAll
+        // (0xFFFFFFFF, a far-future cursor that returns an empty backlog and dropped sleep/HRV/RR).
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let open = Command.syncUpToNow(now: now)
+        XCTAssertEqual(open, Command.syncSince(unixSeconds: 1_750_000_000))
+        XCTAssertNotEqual(open, Command.syncAll)
+        XCTAssertNotEqual(Array(open[2...5]), [0xFF, 0xFF, 0xFF, 0xFF], "cursor must be ≈now, not 0xFFFFFFFF")
+        XCTAssertEqual(Array(open[0...1]), [0x02, 0x00])
+        XCTAssertEqual(Array(open[6...8]), [0x00, 0x01, 0x00])
+    }
+
     func testLiveHRDecode() {
         // Real 0x15 frame from the capture: byte[2] = 0x5B = 91 bpm.
         XCTAssertEqual(LiveHR.decode(hex("15005b0ab0f4")), 91)

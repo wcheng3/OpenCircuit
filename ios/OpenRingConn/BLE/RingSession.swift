@@ -157,8 +157,9 @@ final class RingSession: NSObject {
     }
 
     /// Begin live monitoring. The proven enter sequence (PROTOCOL.md §5.1 / livehr.py) is
-    /// unchanged: open the sync session (cursor 0xFFFFFFFF), let the ring's history backlog
-    /// drain, THEN `d0` → mode (`06 01`/`06 02`) → fetch, then poll `95 00 00`. Idempotent.
+    /// unchanged: open the sync session (cursor 0xFFFFFFFF for a quick read, cursor≈now for the
+    /// overnight capture — see `syncOpen` below), let the ring's history backlog drain, THEN `d0`
+    /// → mode (`06 01`/`06 02`) → fetch, then poll `95 00 00`. Idempotent.
     ///
     /// - `quickLiveRead`: the goal is a prompt live HR/SpO₂ (a user tap or the daytime auto/
     ///   background refresh), not the overnight sleep dump. The drain still runs and pages are
@@ -187,9 +188,13 @@ final class RingSession: NSObject {
         drainSawPage = false
         drainDone = false
         let modeCmd = liveMode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
+        // Quick live read skips the backlog (`syncAll` → empty → lock HR fast); the overnight
+        // background capture (quickLiveRead == false) opens at NOW so the night's backlog drains
+        // (§3). Computed on the MainActor before the Task.
+        let syncOpen = quickLiveRead ? Command.syncAll : Command.syncUpToNow()
         monitorTask = Task { [weak self] in
-            // 1. Init + open the sync session (cursor = everything; verified, §5.6).
-            for cmd in [Command.status0, Command.status1, Command.syncAll] {
+            // 1. Init + open the sync session at `syncOpen`.
+            for cmd in [Command.status0, Command.status1, syncOpen] {
                 guard let self, !Task.isCancelled else { return }
                 self.write(cmd)
                 try? await Task.sleep(for: .milliseconds(250))
@@ -560,7 +565,8 @@ final class RingSession: NSObject {
         persist(last)
     }
 
-    /// Pull stored history: open the sync session (cursor = everything) and fetch.
+    /// Pull stored history: open the sync session at cursor ≈ now (`syncUpToNow`, §3 — drains
+    /// the ring's un-delivered backlog; NOT `syncAll`/0xFFFFFFFF, which returns empty) and fetch.
     /// The ring streams 0x4c/0x47 pages, drained+decoded in didUpdateValue; results
     /// land in `historySamples` once 0x50 (end-of-history) arrives.
     func syncHistory() {
@@ -575,10 +581,13 @@ final class RingSession: NSObject {
         syncQuietTicks = 0
         syncing = true
         syncStatus = nil
-        ringLog.notice("sync: START (cursor=all)")
+        let historyOpen = Command.syncUpToNow()
+        ringLog.notice("sync: START open=\(historyOpen.map { String(format: "%02x", $0) }.joined(separator: " "), privacy: .public) (cursor≈now, §3)")
         syncTask = Task { [weak self] in
-            // Paced enter so CoreBluetooth doesn't drop writes.
-            for cmd in [Command.status0, Command.status1, Command.syncAll, Command.fetch] {
+            // Open at cursor ≈ NOW: the ring streams its un-delivered backlog up to now and
+            // advances its own resume pointer (§3). `syncAll`'s far-future cursor returned an
+            // empty history — the bug that dropped overnight sleep/HRV/RR.
+            for cmd in [Command.status0, Command.status1, historyOpen, Command.fetch] {
                 guard let self else { return }
                 self.write(cmd)
                 try? await Task.sleep(for: .milliseconds(300))
@@ -773,12 +782,17 @@ extension RingSession: CBPeripheralDelegate {
                 self.write(Command.pageAck4C)
                 self.handleActivityPage(data)   // Layer-A epoch decode, gated (#24)
                 return   // always ack to keep draining
+            case 0x82:
+                // Sync-open ACK. At NOTICE so an ACCEPTED open (0x82 arrives) is distinguishable
+                // from a refused one (silence — cursor out of range); debug writes don't persist.
+                ringLog.notice("← 0x82 sync-open ACK: \(self.lastFrame ?? "", privacy: .public)")
+                return
             case 0x50:
                 // End-of-history cursor report (§5.5) — NO XOR trailer, so it never
                 // reaches Frame.parse. Mark done; the sync watchdog / live-enter drain finalizes.
                 self.drainDone = true
                 if self.syncing { self.syncDone = true }
-                ringLog.notice("← 0x50 END-OF-HISTORY (records=\(self.bulkRecords.count))")
+                ringLog.notice("← 0x50 END-OF-HISTORY (records=\(self.bulkRecords.count)) raw=\(self.lastFrame ?? "", privacy: .public)")
                 self.handleEndOfHistory(data)   // finalize epoch session, gated persist (#24)
                 return
             default: break

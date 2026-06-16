@@ -26,7 +26,11 @@ public enum Opcode {
 public enum Command {
     public static let status0: [UInt8] = [0x01, 0x00, 0x00]
     public static let status1: [UInt8] = [0x01, 0x01, 0x31, 0x82, 0x67, 0x00]
-    /// Open the data session. Cursor 0xFFFFFFFF = "sync everything" (always accepted).
+    /// Open the data session at cursor 0xFFFFFFFF — a far-FUTURE cursor. Believed to return an
+    /// EMPTY history (the LIVE path's "skip the backlog, fast HR" open) — ⚠️ 🟡 NOT ground-truthed
+    /// (§3): the official app never sends it, and whether it ADVANCES the ring's resume pointer is
+    /// untested (if it does, the every-10-min auto-measure would shred the backlog). For history
+    /// use `syncUpToNow` (cursor ≈ now → ring drains its backlog up to now). See §3 "Load-bearing".
     public static let syncAll: [UInt8] = [0x02, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01, 0x00]
     public static let statusQuery: [UInt8] = [0xD0, 0x00, 0x00]   // → 0x50; precedes live mode
     public static let liveHRMode: [UInt8] = [0x06, 0x01, 0x00]    // 06 01 = HR; 06 02 = SpO2
@@ -48,14 +52,27 @@ public enum Command {
     /// PROTOCOL.md §5.6 — derived from 3 capture (time,cursor) pairs to <0.34 s).
     public static let syncEpoch = 1_577_793_600
 
-    /// Build `02 00 <cursor BE4> 00 01 00` to open a sync session for data since
-    /// `unixSeconds` (cursor = unixSeconds − syncEpoch, big-endian). For "everything
-    /// pending" use `syncAll` (0xFFFFFFFF) — the reliable choice for live HR.
+    /// Build `02 00 <cursor BE4> 00 01 00` with `cursor = unixSeconds − syncEpoch` (big-endian).
+    /// A plausible-recent cursor acts as a "drain up to ≈now" trigger (§3) — NOT a hard bound
+    /// (records can overshoot it): the ring streams everything it hasn't handed off, from its own
+    /// internal resume point up to its current time, then self-advances that point.
     public static func syncSince(unixSeconds: Int) -> [UInt8] {
-        let c = UInt32(truncatingIfNeeded: max(0, unixSeconds - syncEpoch))
+        // `clamping` (not `truncatingIfNeeded`): a pre-2020 clock clamps to 0, and a far-future
+        // clock clamps to 0xFFFFFFFF (fails safe to the empty/skip-backlog open) instead of
+        // silently WRAPPING to a small value that would look like a valid recent cursor.
+        let c = UInt32(clamping: unixSeconds - syncEpoch)
         return [0x02, 0x00,
                 UInt8(c >> 24), UInt8((c >> 16) & 0xFF), UInt8((c >> 8) & 0xFF), UInt8(c & 0xFF),
                 0x00, 0x01, 0x00]
+    }
+
+    /// Open a HISTORY sync "up to NOW" — cursor ≈ current wall-clock (🟢 the official app's history
+    /// behaviour, PROTOCOL.md §3: it opens at ≈now every sync). This triggers a drain up to the
+    /// ring's current time and advances its OWN resume pointer, so there is nothing to persist on
+    /// our side. Use this — NOT `syncAll` (0xFFFFFFFF, far-future, which does NOT pull history) —
+    /// for sleep/vitals history. `now` is injectable for tests.
+    public static func syncUpToNow(now: Date = Date()) -> [UInt8] {
+        syncSince(unixSeconds: Int(now.timeIntervalSince1970))
     }
 }
 
