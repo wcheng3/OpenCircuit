@@ -138,12 +138,17 @@ final class RingScanner: NSObject {
     }
 
     /// Cancel any in-flight reconnect backoff and clear the calm state (#35). Used on a fresh
-    /// user scan, a user stop/disconnect, and once a link proves stable.
+    /// user scan, a user stop/disconnect, and once a link proves stable. Also clears the
+    /// deferred radio-off reconnect flag: a backoff timer that fired while the radio was off
+    /// sets `reconnectWhenPoweredOn`, and a subsequent user `disconnect()` must not leave that
+    /// armed — otherwise the next `.poweredOn` would re-issue a reconnect against disconnect()'s
+    /// "STOP auto-reconnecting" intent. (Reviewer MINOR.)
     private func resetReconnectBackoff() {
         reconnectTask?.cancel(); reconnectTask = nil
         connectStableTask?.cancel(); connectStableTask = nil
         reconnectAttempts = 0
         reconnectStalled = false
+        reconnectWhenPoweredOn = false
     }
 
     /// Reconnect to the last-known ring WITHOUT scanning. `retrievePeripherals` resurfaces a
