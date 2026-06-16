@@ -77,6 +77,7 @@ final class RingSession: NSObject {
     private(set) var syncStatus: String?
 
     private var bulkRecords: [BulkRecord] = []
+    private var bulkFinalized = false    // captured pages already committed (sleep/vitals) — stop-time safety net skips re-commit
     private var lastRawSteps: Int?       // last raw descriptor [4:6] counter (for delta accumulation)
     private var dailyStepsTotal = 0      // accumulated daily step total (mirrors StoredDaily)
     private var syncTask: Task<Void, Never>?
@@ -105,12 +106,22 @@ final class RingSession: NSObject {
         peripheral.discoverServices(nil)
     }
 
-    /// Begin live monitoring. The ring will NOT emit live frames until its pending
-    /// history backlog is fully drained (PROTOCOL.md §5.1 / livehr.py): open the sync
-    /// session (cursor 0xFFFFFFFF), drain every 0x47/0x4c page to completion, THEN
-    /// `d0` → mode (`06 01`/`06 02`) → fetch, then poll `95 00 00`. Entering live mode
-    /// before the drain finishes leaves HR stuck at the warm-up sentinel (8). Idempotent.
-    func startLiveMonitoring() {
+    /// Begin live monitoring. The proven enter sequence (PROTOCOL.md §5.1 / livehr.py) is
+    /// unchanged: open the sync session (cursor 0xFFFFFFFF), let the ring's history backlog
+    /// drain, THEN `d0` → mode (`06 01`/`06 02`) → fetch, then poll `95 00 00`. Idempotent.
+    ///
+    /// - `quickLiveRead`: the goal is a prompt live HR/SpO₂ (a user tap or the daytime auto/
+    ///   background refresh), not the overnight sleep dump. The drain still runs and pages are
+    ///   still captured, but we don't wait out a long backlog before entering live mode — the
+    ///   old 15 s worst-case wait starved the HR poll of its budget so it never locked in the
+    ///   background (#45). On a quiet ring the drain already exits on a beat of quiet, so this
+    ///   mostly just caps the pathological never-quiet case. The full (quiet-bounded) drain —
+    ///   used by the overnight background capture — still runs when this is false so sleep isn't
+    ///   lost.
+    /// - `clearStaleValue`: drop the last `liveHR` up front so an old reading can't masquerade
+    ///   as live while a fresh user measurement warms up (#45 C). Off for auto/background so a
+    ///   prior value stays on screen until the new one locks.
+    func startLiveMonitoring(quickLiveRead: Bool = false, clearStaleValue: Bool = false) {
         guard monitorTask == nil else { return }
         // Live and history sync can't coexist (ring is one mode at a time). Cancel any
         // in-flight sync so the ring is free to enter live mode.
@@ -118,9 +129,11 @@ final class RingSession: NSObject {
         syncing = false
         monitoring = true
         livePreparing = true
+        if clearStaleValue { liveHR = nil }   // fresh user read — don't let a stale value look live (#45 C)
         liveHRTrend.removeAll()   // fresh convergence window
         liveHRWarmup = nil
         bulkRecords.removeAll()   // any pages we drain below land here (don't lose them)
+        bulkFinalized = false
         drainSawPage = false
         drainDone = false
         let modeCmd = liveMode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
@@ -131,13 +144,18 @@ final class RingSession: NSObject {
                 self.write(cmd)
                 try? await Task.sleep(for: .milliseconds(250))
             }
-            // 2. CRITICAL: drain the history backlog to completion before live mode.
-            //    Pages are acked in didUpdateValue; wait for the 0x50 end marker or
-            //    ~1.5 s of quiet (cap ~15 s for a large overnight backlog).
+            // 2. Drain the history backlog before live mode. Pages are acked in
+            //    didUpdateValue; exit on the 0x50 end marker or a beat of quiet. A normal
+            //    overnight dump streams sub-second apart and then stops, so the quiet exit
+            //    fires right after the last page — the cap is only a backstop for a ring that
+            //    never goes quiet. For a quick live read that backstop is short (don't let a
+            //    pathological backlog eat the HR poll's budget, #45); the full-drain path keeps
+            //    the longer cap so a big overnight backlog is fully captured.
             guard let s0 = self, !Task.isCancelled else { return }
             s0.write(Command.fetch)
+            let drainMaxTicks = quickLiveRead ? 6 : 30   // ×500 ms ⇒ ~3 s quick / ~15 s full backstop
             var quiet = 0
-            for _ in 0 ..< 30 {
+            for _ in 0 ..< drainMaxTicks {
                 try? await Task.sleep(for: .milliseconds(500))
                 guard let self, !Task.isCancelled else { return }
                 if self.drainDone { break }
@@ -152,6 +170,7 @@ final class RingSession: NSObject {
                 self.stagedSegments = BulkSleep.stagedSegments(from: self.bulkRecords)
                 self.persist(self.historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
                 self.persistSleepAndSteps()          // sleep summary + steps for offline display
+                self.bulkFinalized = true            // committed — the stop-time safety net can skip it
             }
             // 3. Leave bulk mode and enter the selected live mode.
             for cmd in [Command.statusQuery, modeCmd, Command.fetch] {
@@ -189,6 +208,11 @@ final class RingSession: NSObject {
     /// gap is time we're not connected — and with no official-app contention, that's it).
     /// Skips ticks during live monitoring / sync, which generate descriptor traffic of
     /// their own (and where an extra fetch can disturb the HR warm-up window).
+    ///
+    /// The cadence is ADAPTIVE (#31): a fixed 30 s poll around the clock measurably drained
+    /// both batteries for a step counter that barely moves. Steps/battery drift slowly, and
+    /// skin temp only matters overnight (already window-gated), so we poll slowly by day and
+    /// tighten only inside the nightly window — `KeepaliveCadence` owns the policy.
     func startKeepalive() {
         guard keepaliveTask == nil else { return }
         keepaliveTask = Task { [weak self] in
@@ -203,12 +227,30 @@ final class RingSession: NSObject {
             }
             while !Task.isCancelled {
                 guard let self else { return }
+                // Re-resolve the night window (self-throttled to ≤ every 30 min) so the cadence
+                // tightens/relaxes as the window rolls over, not just at connect.
+                await self.refreshNightWindowIfNeeded()
                 if self.ready, !self.monitoring, !self.livePreparing, self.syncTask == nil {
                     self.write(Command.fetch)   // 07 00 00 → fresh 0x10/0x87 descriptor
                 }
-                try? await Task.sleep(for: .seconds(30))
+                try? await Task.sleep(for: .seconds(self.keepaliveInterval))
             }
         }
+    }
+
+    /// UserDefaults key for the battery-saver toggle — stretches the idle keepalive cadence (#31).
+    /// Default OFF (max fidelity); a stored `true` opts into the slower daytime/night cadences.
+    static let batterySaverEnabledKey = "keepalive.batterySaver"
+
+    /// Adaptive idle-keepalive interval (seconds): slow by day, tighter inside the nightly temp
+    /// window or while a live read holds the link, stretched further in battery saver (#31).
+    /// Policy lives in the pure, unit-tested `KeepaliveCadence`.
+    private var keepaliveInterval: TimeInterval {
+        KeepaliveCadence.interval(
+            isNight: nightWindow?.contains(Date()) ?? false,
+            activeMeasurement: monitoring || livePreparing,
+            batterySaver: UserDefaults.standard.bool(forKey: Self.batterySaverEnabledKey)
+        )
     }
 
     /// UserDefaults key for the periodic auto-measure toggle (default ON — the user opted in).
@@ -268,7 +310,7 @@ final class RingSession: NSObject {
     private func autoMeasureOnce(mode: LiveMode, timeout: TimeInterval) async {
         guard idleForAutoMeasure else { return }
         autoMeasuring = true
-        startMonitoring(mode: mode)             // sets monitoring=true; drains, enters, polls
+        startMonitoring(mode: mode, userInitiated: false)   // auto refresh: prompt enter, keep last value until it locks
         let deadline = Date().addingTimeInterval(timeout)
         while !Task.isCancelled && Date() < deadline {
             if mode == .hr, liveHR != nil { break }
@@ -340,12 +382,42 @@ final class RingSession: NSObject {
     /// Start (or switch) live monitoring in a single mode. Guarantees only one metric
     /// reads at a time: switching to a mode puts the ring in `06 01`/`06 02`, so frames
     /// for the other metric stop arriving.
-    func startMonitoring(mode: LiveMode) {
+    ///
+    /// - `userInitiated`: a real Measure tap. When already live in the SAME mode it re-arms a
+    ///   fresh poll (#45 B) — without this, tapping Measure on a stalled stream was a silent
+    ///   no-op. The periodic auto-measure passes `false` so it never disturbs a converging read.
+    /// - `quickLiveRead`: prompt live-read entry (the default for foreground/auto). The overnight
+    ///   background capture passes `false` for the full sleep drain (see `startLiveMonitoring`).
+    func startMonitoring(mode: LiveMode, userInitiated: Bool = true, quickLiveRead: Bool = true) {
         if monitoring {
-            setLiveMode(mode)
+            if liveMode == mode {
+                if userInitiated { rearmUserMeasure() }   // re-poll on demand; auto leaves it alone
+            } else {
+                setLiveMode(mode)
+            }
         } else {
             liveMode = mode
-            startLiveMonitoring()
+            startLiveMonitoring(quickLiveRead: quickLiveRead, clearStaleValue: userInitiated)
+        }
+    }
+
+    /// Re-arm an already-running live read for a fresh user measurement (#45 B/C): drop the
+    /// stale value + convergence window, then re-issue the proven `d0` → mode → fetch enter so
+    /// the ring restarts the measurement. The existing poll loop keeps sending `95 00 00`, so no
+    /// second loop is spawned. This intentionally kicks HR back to warm-up — exactly what a user
+    /// asking for a new reading wants.
+    private func rearmUserMeasure() {
+        liveHR = nil
+        liveHRTrend.removeAll()
+        liveHRWarmup = nil
+        let modeCmd = liveMode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
+        Task { [weak self] in
+            guard let self else { return }
+            self.write(Command.statusQuery)
+            try? await Task.sleep(for: .milliseconds(250))
+            self.write(modeCmd)
+            try? await Task.sleep(for: .milliseconds(250))
+            self.write(Command.fetch)
         }
     }
 
@@ -378,6 +450,18 @@ final class RingSession: NSObject {
         monitorTask = nil
         monitoring = false
         livePreparing = false
+        // Safety net for a background teardown that interrupted the live-enter drain before its
+        // post-drain commit ran (#22 bg race): persist the captured pages so an overnight read
+        // that never reached its finalize doesn't silently drop last night's sleep/vitals.
+        // No-op once the drain already committed (bulkFinalized) or nothing was captured.
+        if !bulkRecords.isEmpty, !bulkFinalized {
+            historySamples = BulkSleep.samples(from: bulkRecords)
+            sleepSegments = BulkSleep.sleepSegments(from: bulkRecords)
+            stagedSegments = BulkSleep.stagedSegments(from: bulkRecords)
+            persist(historySamples)
+            persistSleepAndSteps()
+            bulkFinalized = true
+        }
         // Persist the last live reading so the dashboard shows it after disconnect.
         let now = Date()
         var last: [QuantitySample] = []
@@ -393,6 +477,7 @@ final class RingSession: NSObject {
         guard syncTask == nil else { return }   // already syncing
         stopLiveMonitoring()                     // live polling would fight the drain
         bulkRecords.removeAll()
+        bulkFinalized = false                    // fresh capture — uncommitted until finalizeSync
         historySamples.removeAll()
         sleepSegments.removeAll()
         stagedSegments.removeAll()
@@ -433,6 +518,7 @@ final class RingSession: NSObject {
         stagedSegments = BulkSleep.stagedSegments(from: bulkRecords)
         persist(historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
         persistSleepAndSteps()    // sleep summary + steps for offline display
+        bulkFinalized = true      // committed — the stop-time safety net can skip these records
         syncing = false
         syncTask = nil
         ringLog.notice("sync: FINALIZE records=\(self.bulkRecords.count) samples=\(self.historySamples.count) sleepSegs=\(self.sleepSegments.count) steps=\(self.steps ?? -1)")

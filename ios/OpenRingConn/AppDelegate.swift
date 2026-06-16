@@ -41,7 +41,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                     store: LocalStore(container.mainContext),
                     health: HealthKitWriter()
                 )
-                let synced = try await service.syncVitals(timeout: 20)
+                // Use the service's adaptive budget (longer than the old 20 s so the live-HR
+                // poll isn't starved by the history drain, #45 A). The expirationHandler below
+                // still cancels cleanly if iOS grants a shorter window.
+                let synced = try await service.syncVitals()
                 guard !Task.isCancelled else { return }
                 scheduler.schedule()
                 task.setTaskCompleted(success: synced)
