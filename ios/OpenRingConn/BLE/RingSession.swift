@@ -98,8 +98,7 @@ final class RingSession: NSObject {
 
     private var bulkRecords: [BulkRecord] = []
     private var bulkFinalized = false    // captured pages already committed (sleep/vitals) — stop-time safety net skips re-commit
-    private var lastRawSteps: Int?       // last raw descriptor [4:6] counter (for delta accumulation)
-    private var dailyStepsTotal = 0      // accumulated daily step total (mirrors StoredDaily)
+    private var dailyStepsTotal = 0      // cached display total for the last sample day (mirrors StoredDaily)
     private var syncTask: Task<Void, Never>?
     private var syncDone = false        // 0x50 end-of-history seen
     private var syncQuietTicks = 0      // seconds since the last page arrived
@@ -441,6 +440,32 @@ final class RingSession: NSObject {
         // Steps are accumulated live in didUpdateValue (addDailySteps) — nothing to do here.
     }
 
+    // MARK: Step counter state (cross-session, #34)
+    //
+    // The ring's onboard step counter (descriptor [4:6]) is a since-handoff DELTA the official
+    // app resets; if that app isn't running it keeps climbing (it does NOT reset at midnight on
+    // its own). To compute a TRUE delta across a reconnect — instead of rebasing to the current
+    // counter and dropping every step taken while we were disconnected — we persist the last raw
+    // value AND the day it was seen in UserDefaults (not LocalStore: avoids a SwiftData migration
+    // and a per-day-row collision). The per-day TOTAL still lives in StoredDaily via addDailySteps.
+
+    private static let lastRawStepsKey = "steps.lastRawValue"      // Int: last raw [4:6] counter
+    private static let lastRawStepsDayKey = "steps.lastRawDay"     // Date: start-of-day it was observed
+
+    /// Last raw counter we recorded, or nil if we've never seen one (first run / cleared). Stored
+    /// as an object so a legitimate 0 reading is distinguishable from "unset".
+    private var persistedLastRawSteps: Int? {
+        UserDefaults.standard.object(forKey: Self.lastRawStepsKey) as? Int
+    }
+    /// Start-of-day the persisted raw counter was observed (for midnight-rollover detection).
+    private var persistedLastRawStepsDay: Date? {
+        UserDefaults.standard.object(forKey: Self.lastRawStepsDayKey) as? Date
+    }
+    private func persistStepRawState(raw: Int, day: Date) {
+        UserDefaults.standard.set(raw, forKey: Self.lastRawStepsKey)
+        UserDefaults.standard.set(day, forKey: Self.lastRawStepsDayKey)
+    }
+
     /// Start (or switch) live monitoring in a single mode. Guarantees only one metric
     /// reads at a time: switching to a mode puts the ring in `06 01`/`06 02`, so frames
     /// for the other metric stop arriving.
@@ -665,25 +690,40 @@ extension RingSession: CBPeripheralDelegate {
             // Frames arriving while the link isn't `ready` mean discovery didn't land on this
             // (restored) reconnect — re-run it so we can ack and the buttons enable. #reconnect
             if !self.ready { self.rediscoverIfNeeded() }
-            // The ring's onboard step counter (descriptor [4:6], §5.4) is a since-handoff DELTA that
-            // resets (the official app sums it in local memory). So accumulate observed deltas
-            // into a persistent daily total, reset-aware, rather than showing the raw counter
-            // (which reset to 0). NOTE: we only count steps while THIS app is connected, so the
-            // total lags the always-connected official app — but it never resets to 0.
+            // The ring's onboard step counter (descriptor [4:6], §5.4) is a since-handoff DELTA the
+            // official app resets; if that app isn't running it keeps climbing (it does NOT reset
+            // at midnight on its own). Fold each observed counter into a persistent per-day total,
+            // reset-aware, using the last raw value persisted ACROSS sessions — so a reconnect
+            // computes the TRUE delta since we last saw the ring instead of rebasing to the current
+            // counter and dropping every step taken while disconnected (#34). The pure, unit-tested
+            // StepAccumulator owns the reset/midnight math; this stays a thin caller.
             if let v = DeviceStatus.steps(bytes) {
-                if lastRawSteps == nil {
-                    // First reading this session — recover today's accumulated total from the
-                    // store and use this counter as the baseline (don't retro-count unseen steps).
-                    dailyStepsTotal = (try? localStore?.todaySteps()) ?? 0
-                } else if let last = lastRawSteps {
-                    let delta = v >= last ? v - last : v   // v < last => ring reset; v is the new count
-                    if delta > 0 {
-                        dailyStepsTotal += delta
-                        try? localStore?.addDailySteps(delta)
+                // Stamp by SAMPLE time (when the descriptor arrived), not ingest time, so a delta
+                // observed at 00:00:01 lands on the right day (#34). lastFrameAt was just set above.
+                let sampleDate = self.lastFrameAt ?? Date()
+                let sampleDay = Calendar.current.startOfDay(for: sampleDate)
+                let previousRaw = self.persistedLastRawSteps
+                let dayChanged = previousRaw != nil && self.persistedLastRawStepsDay != sampleDay
+                let update = StepAccumulator.update(previousRaw: previousRaw, newRaw: v, dayChanged: dayChanged)
+                if update.isReset {
+                    // Disambiguate a mid-day reset/handoff (unexpected — log loudly) from the
+                    // official app's normal midnight reset (expected) so we never silently miscount.
+                    if update.isAnomalousReset {
+                        ringLog.notice("steps: mid-day counter reset \(previousRaw ?? -1)→\(v) — counting \(v) as new (handoff/reboot/wrap)")
+                    } else {
+                        ringLog.debug("steps: counter reset across midnight \(previousRaw ?? -1)→\(v) — counting \(v) on new day (expected)")
                     }
                 }
-                lastRawSteps = v
+                if update.deltaToAdd > 0 {
+                    try? localStore?.addDailySteps(update.deltaToAdd, day: sampleDate)
+                }
+                // Re-read the sample day's total from the store as the live display value: a fresh
+                // row on midnight rollover reads its own total (no prior-day baseline bleed), and a
+                // baseline-only first reading recovers today's already-accumulated count.
+                dailyStepsTotal = (try? localStore?.todaySteps(day: sampleDate)) ?? dailyStepsTotal
                 self.steps = dailyStepsTotal
+                // Persist the raw counter + its day for the NEXT reading (cross-session, #34).
+                self.persistStepRawState(raw: v, day: sampleDay)
             }
             // Skin temperature rides the same 0x10/0x87 descriptor (§5.4). It streams live
             // (~30–60 s) and is NOT in the sleep sync, so capture + persist it here — but ONLY
