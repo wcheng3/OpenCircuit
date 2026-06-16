@@ -428,11 +428,12 @@ struct LocalStore {
         return try context.fetch(descriptor).first
     }
 
-    /// Upsert the day's step count, keyed by start-of-day. The ring's onboard count only
-    /// grows within a day, so keep the max for the day; a new day gets its own row.
-    /// Accumulate a step DELTA into today's running total. The ring's onboard counter is a
-    /// since-handoff delta that RESETS (the official app sums the deltas in local memory), so
-    /// we sum observed deltas the same way rather than storing the raw counter. New day = new row.
+    /// Accumulate a step DELTA into the running total for `day`, UPSERTED by start-of-day. The
+    /// ring's onboard counter is a since-handoff delta that RESETS (the official app sums the
+    /// deltas in local memory), so we sum observed deltas the same way rather than storing the
+    /// raw counter — `StepAccumulator` (#34) computes the reset-aware delta. New day = new row.
+    /// `day` is the SAMPLE time of the reading (when the descriptor arrived), so a delta observed
+    /// just after midnight for late-night steps is stamped onto its own day, not the prior one.
     func addDailySteps(_ delta: Int, day: Date = Date()) throws {
         guard delta > 0 else { return }
         let dayStart = Calendar.current.startOfDay(for: day)
