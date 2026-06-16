@@ -13,7 +13,7 @@ struct VitalsTableView: View {
     /// Latest stored sample per displayed kind (newest first, capped at 1 each).
     @Query private var latestHR: [StoredSample]
     @Query private var latestSpO2: [StoredSample]
-    @Query private var latestTemp: [StoredSample]
+    @Query private var latestTempSample: [StoredSample]
     @Query private var latestHRV: [StoredSample]
     @Query private var latestRR: [StoredSample]
     /// Heart-rate samples over the last 24 h — the window resting HR (the sleep low) scans.
@@ -64,7 +64,7 @@ struct VitalsTableView: View {
 
         _latestHR = Query(Self.latestDescriptor(hr))
         _latestSpO2 = Query(Self.latestDescriptor(spo2))
-        _latestTemp = Query(Self.latestDescriptor(temp))
+        _latestTempSample = Query(Self.latestDescriptor(temp))
         _latestHRV = Query(Self.latestDescriptor(hrv))
         _latestRR = Query(Self.latestDescriptor(rr))
         _recentHR = Query(FetchDescriptor<StoredSample>(
@@ -115,7 +115,7 @@ struct VitalsTableView: View {
         var out: [MetricKind: StoredSample] = [:]
         out[.heartRate] = latestHR.first
         out[.spo2] = latestSpO2.first
-        out[.temperature] = latestTemp.first
+        out[.temperature] = latestTempSample.first
         out[.hrvSDNN] = latestHRV.first
         out[.respiratoryRate] = latestRR.first
         return out
