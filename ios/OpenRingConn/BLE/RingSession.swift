@@ -698,8 +698,11 @@ extension RingSession: CBPeripheralDelegate {
             // counter and dropping every step taken while disconnected (#34). The pure, unit-tested
             // StepAccumulator owns the reset/midnight math; this stays a thin caller.
             if let v = DeviceStatus.steps(bytes) {
-                // Stamp by SAMPLE time (when the descriptor arrived), not ingest time, so a delta
-                // observed at 00:00:01 lands on the right day (#34). lastFrameAt was just set above.
+                // Stamp by SAMPLE time (when the descriptor arrived), not a hardcoded Date(), so a
+                // delta lands on the right StoredDaily row at a day boundary (#34). NOTE: on the LIVE
+                // path lastFrameAt was just set to now (line ~689), so sampleDate ≈ ingest time — this
+                // picks the correct day for the row/persist + display re-read, but it cannot back-date
+                // steps actually taken at 23:59 onto the prior day (no per-step timestamps on the wire).
                 let sampleDate = self.lastFrameAt ?? Date()
                 let sampleDay = Calendar.current.startOfDay(for: sampleDate)
                 let previousRaw = self.persistedLastRawSteps
