@@ -133,6 +133,11 @@ struct ContentView: View {
                 } else if session?.autoMeasuring == true {
                     ProgressView().controlSize(.small)
                     Text("Auto-measuring…").font(.caption).foregroundStyle(.secondary)
+                } else if hrMeasuring {
+                    // A user HR measure that's converging but hasn't locked — show warm-up
+                    // progress so a fresh Measure reads as "still climbing", not dead/stale (#45 C).
+                    ProgressView().controlSize(.small)
+                    Text(hrWarmupText).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 // Ring battery (a device stat, not a body vital) sits with the connection.
@@ -152,6 +157,18 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
             }
         }
+    }
+
+    /// A user (non-auto) HR measurement that's converging but hasn't locked yet (#45 C). The
+    /// auto-measure branch above takes precedence, so this only lights up for a hand-started read.
+    private var hrMeasuring: Bool {
+        session?.monitoring == true && session?.liveMode == .hr && session?.liveHR == nil
+    }
+    /// Warm-up label: surfaces the climbing raw HR byte when present (proves frames are arriving
+    /// and the sensor is warming up vs. no contact), else a plain measuring note.
+    private var hrWarmupText: String {
+        if let w = session?.liveHRWarmup { return "Warming up HR… (\(w))" }
+        return "Measuring HR…"
     }
 
     /// SF Symbol for the ring's battery level.

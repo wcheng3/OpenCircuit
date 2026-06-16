@@ -11,6 +11,15 @@ struct RingBackgroundSyncService {
         self.health = health
     }
 
+    /// Budget for one background read. The old 20 s let the history drain eat the whole window
+    /// before the live-HR poll even started, so HR never locked in the background (#45 A). We now
+    /// run nearer the BGAppRefreshTask ceiling so the poll gets a real budget after the drain;
+    /// the task's `expirationHandler` (AppDelegate) still cancels cleanly if iOS grants less, and
+    /// the capture loop is cancellation-aware. (Honest: BGAppRefreshTask windows are short, so a
+    /// full ~60 s optical lock isn't guaranteed every run — but the drain no longer starves it,
+    /// any lock now reaches HealthKit, and the standing reconnect gives repeat chances.)
+    static let defaultTimeout: TimeInterval = 28
+
     /// One bounded background read so the app already has last night's data on open. The
     /// drain inside `captureForBackground` persists overnight HR/HRV/SpO2 + sleep + steps +
     /// skin temp to the local store (the dashboard's source) — skin temp ONLY during the
@@ -19,7 +28,7 @@ struct RingBackgroundSyncService {
     /// double-writes. Returns the BGTask success flag — true when we captured ANY data, not
     /// only a live HR, so iOS keeps scheduling us even on nights the optical HR never locks.
     @discardableResult
-    func syncVitals(timeout: TimeInterval = 20) async throws -> Bool {
+    func syncVitals(timeout: TimeInterval = RingBackgroundSyncService.defaultTimeout) async throws -> Bool {
         let scanner = RingScanner.shared
         scanner.setLocalStore(store)   // RingSession auto-persists the drained history + temp
         let capture = await scanner.captureForBackground(timeout: timeout)

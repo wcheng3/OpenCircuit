@@ -168,11 +168,12 @@ final class RingScanner: NSObject {
         reconnectKnownPeripheral()   // re-arm the standing pending connect (no scan)
     }
 
-    /// What a bounded background read captured. `startMonitoring(.hr)` first drains the
-    /// ring's history backlog to completion (overnight HR/HRV/SpO2 → the store, plus the
-    /// sleep segments + step/temp descriptor) BEFORE it can poll a live HR, so even when the
-    /// live HR never locks we still come away with last night's data. `gotData` is the
-    /// BGTask success flag — true if we captured anything worth persisting, not just an HR.
+    /// What a bounded background read captured. The background read uses the FULL (quiet-bounded)
+    /// drain — `startMonitoring(.hr, userInitiated: false, quickLiveRead: false)` — so the
+    /// overnight HR/HRV/SpO2 + sleep segments + step/temp descriptor land in the store before it
+    /// polls a live HR, and we still come away with last night's data even when the optical HR
+    /// never locks. `gotData` is the BGTask success flag — true if we captured anything worth
+    /// persisting, not just an HR.
     struct BackgroundCapture {
         var heartRate: Int?
         var sleepSegments: [SleepSegment] = []
@@ -197,7 +198,11 @@ final class RingScanner: NSObject {
         while !Task.isCancelled && Date() < deadline {
             if let session, session.ready {
                 if !didStart {
-                    session.startMonitoring(mode: .hr)
+                    // Full drain (capture overnight sleep) but NOT user-initiated — keep any
+                    // prior live HR until a fresh one locks. The extended background timeout
+                    // (below) is what finally gives the HR poll a real budget so it can lock
+                    // instead of being crammed behind the drain (#45 A).
+                    session.startMonitoring(mode: .hr, userInitiated: false, quickLiveRead: false)
                     didStart = true
                 }
                 // Snapshot the decoded history as it lands; the drain completes before the
