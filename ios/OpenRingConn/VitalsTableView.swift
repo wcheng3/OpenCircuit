@@ -127,6 +127,21 @@ struct VitalsTableView: View {
         recentHR.map(\.value).min().map { Int($0) }
     }
 
+    // MARK: First-run empty-state (#58)
+
+    /// True once at least one genuinely sleep-derived sample has been persisted (HRV, RR, or a
+    /// stored sleep summary). Resting HR is deliberately EXCLUDED: it's the min of ANY heart-rate
+    /// sample in the last 24 h, and an on-demand "Measure HR" tap persists a `.heartRate` sample on
+    /// disconnect (RingSession.swift) — so a single daytime reading would otherwise flip this true
+    /// before any overnight sync, suppressing `overnightSyncHint` and reverting the Sleep row to a
+    /// bare "—" WHILE HRV/RR still show "after overnight sync" (a contradictory first-run UI). The
+    /// four overnight rows (HRV, Resting HR, Respiratory Rate, Sleep) reflect this data; when false
+    /// they show the first-run empty state rather than reading as genuinely missing today's value.
+    /// (#58)
+    private var hasSleepVitals: Bool {
+        latestHRV.first != nil || latestRR.first != nil || storedSleep.first != nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             measurableRow("Heart Rate", value: hrText, mode: .hr, active: hrActive,
@@ -141,14 +156,19 @@ struct VitalsTableView: View {
             divider
             skinTempRow
             divider
-            row("HRV", value: valueText(.hrvSDNN) { "\(Int($0)) ms" }, time: nightlyWhen(.hrvSDNN))
+            // Sleep-derived rows: caption "after overnight sync" on each bare "—" row so the
+            // user understands WHY they're empty, rather than seeing a bare dash with no context.
+            // The overnightSyncHint in the sleep section below gives the full explanation. (#58)
+            row("HRV", value: valueText(.hrvSDNN) { "\(Int($0)) ms" },
+                time: latestHRV.isEmpty ? "after overnight sync" : nightlyWhen(.hrvSDNN))
             divider
-            row("Resting HR", value: restingHR.map { "\($0) bpm" } ?? "—", time: nil)
+            row("Resting HR", value: restingHR.map { "\($0) bpm" } ?? "—",
+                time: restingHR == nil ? "after overnight sync" : nil)
             divider
             row("Steps (today)", value: stepsText, time: stepsTime)
             divider
             row("Respiratory Rate", value: valueText(.respiratoryRate) { String(format: "%.1f /min", $0) },
-                time: nightlyWhen(.respiratoryRate))
+                time: latestRR.isEmpty ? "after overnight sync" : nightlyWhen(.respiratoryRate))
             divider
             sleepSection
         }
@@ -177,9 +197,35 @@ struct VitalsTableView: View {
                     .font(.caption2).foregroundStyle(.tertiary)
             }
             .padding(.vertical, 8)
-        } else {
+        } else if hasSleepVitals {
+            // Syncs have run but no sleep detected for the most recent night.
             row("Sleep", value: "—", time: nil)
+        } else {
+            // No overnight sync has completed yet — show an informative empty state that groups
+            // the explanation for all four sleep-derived rows. Distinct from `activationHint`
+            // (orange warning, connection-level) — this is informational, data-level. (#58)
+            overnightSyncHint
         }
+    }
+
+    /// Empty-state shown in the sleep section when no overnight sync has completed. Groups the
+    /// explanation for HRV, Resting HR, Respiratory Rate, and Sleep in one place so the user
+    /// sees a clear message rather than four bare "—" rows with no context. (#58)
+    @ViewBuilder private var overnightSyncHint: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "moon.zzz")
+                .font(.subheadline)
+                .foregroundStyle(.indigo)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("HRV · Resting HR · Respiratory Rate · Sleep")
+                    .font(.subheadline.weight(.medium))
+                Text("Available after your first overnight sync. Wear the ring to bed and connect in the morning.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
     }
 
     // MARK: rows
