@@ -198,4 +198,54 @@ final class BulkSleepTests: XCTestCase {
         XCTAssertEqual(r.heartRate, 68, "but HR survives")
         XCTAssertEqual(r.hrvRMSSD, 77)
     }
+
+    // MARK: #41 — wear gate WIRED through BulkSleep.sleepSegments / mainSleep
+    //
+    // SleepDetection's temperature path is covered in SleepDetectionTests; these assert the
+    // `temperatures:` overload that RingSession actually calls threads that gate end-to-end, so
+    // a charging/off-wrist still night doesn't get committed (to the dashboard or Apple Health)
+    // as a night of sleep.
+
+    /// A synthetic night: 20 active epochs, ~9 h still (216 epochs), 20 active. One temperature
+    /// sample per epoch at `celsius`, spanning the records' real time range.
+    private func night() -> [BulkRecord] {
+        var recs: [BulkRecord] = []
+        var c: UInt32 = 0x0c220000
+        for _ in 0..<20 { recs.append(rec(c, motion: 0x14, sub: 0x12)); c += 150 }
+        for _ in 0..<216 { recs.append(rec(c, motion: 0x01, sub: 0x62)); c += 150 }
+        for _ in 0..<20 { recs.append(rec(c, motion: 0x14, sub: 0x12)); c += 150 }
+        return recs
+    }
+    private func temps(for recs: [BulkRecord], celsius: Double) -> [TemperatureSample] {
+        recs.map { TemperatureSample(time: $0.date(), celsius: celsius) }
+    }
+
+    func testSleepSegmentsWearGateDropsColdNight() {
+        let recs = night()
+        // Motion-only (status quo): the still block reads as a night of sleep.
+        XCTAssertTrue(BulkSleep.sleepSegments(from: recs).contains { $0.stage == .inBed },
+                      "motion-only: still block reads as sleep")
+        // Worn (32 °C): still a night of sleep.
+        XCTAssertTrue(BulkSleep.sleepSegments(from: recs, temperatures: temps(for: recs, celsius: 32))
+                        .contains { $0.stage == .inBed },
+                      "worn temps keep the night")
+        // Cold (22 °C, off-wrist / charging): no sleep night survives the gate.
+        XCTAssertTrue(BulkSleep.sleepSegments(from: recs, temperatures: temps(for: recs, celsius: 22)).isEmpty,
+                      "cold (unworn) still block must not produce a sleep night")
+    }
+
+    func testMainSleepWearGateDropsColdNight() {
+        let recs = night()
+        XCTAssertNotNil(BulkSleep.mainSleep(from: recs, temperatures: temps(for: recs, celsius: 32)),
+                        "worn night has a main sleep block")
+        XCTAssertNil(BulkSleep.mainSleep(from: recs, temperatures: temps(for: recs, celsius: 22)),
+                     "cold night yields no main sleep block")
+    }
+
+    func testSleepSegmentsEmptyTemperaturesUnchanged() {
+        let recs = night()
+        XCTAssertEqual(BulkSleep.sleepSegments(from: recs, temperatures: []).count,
+                       BulkSleep.sleepSegments(from: recs).count,
+                       "no temp coverage ⇒ identical to motion-only (absence ≠ unworn)")
+    }
 }
