@@ -673,9 +673,10 @@ final class RingSession: NSObject {
             syncStatus = "Synced \(bulkRecords.count) epochs"
         } else if steps != nil {
             // Link is fine (status frames arrived) — the ring just had no un-synced
-            // sleep/vitals pages. It only holds history it hasn't handed off yet, so
-            // once the official app (or a prior sync) drains it, there's nothing left.
-            syncStatus = "No new sleep/vitals history on the ring (it only keeps un-synced data). Live status OK."
+            // sleep/vitals pages. It only stores history until it has been handed off once;
+            // a prior sync (or the official app) has already drained it. Last night's HRV,
+            // Resting HR, RR, and Sleep are still visible in the vitals dashboard. (#58)
+            syncStatus = "Up to date — last night is likely already in the vitals dashboard. The ring clears history after each sync, so nothing new to fetch."
         } else {
             syncStatus = "No data received — is the ring bonded/awake?"
         }
