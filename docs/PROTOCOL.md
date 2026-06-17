@@ -476,9 +476,36 @@ the `0x10`/`0x87` descriptor `[1]`, §5.4 🟢 — already decoded.)
 
 **`81 01 …`** (38 B, ← `01 01 <nonce>`): mostly constant; notable — `[27:32]`=
 `21 49 ac <XX> f4` (4/5 const, device-id-like) · `[34:36]`=16-bit monotonic counter
-≈ 1/sec (30→1475→9045 over 3 sessions) 🟡. The `01 01 <3-B nonce>` arg is per-session
-and **arbitrary** (ring accepts any value — see §4); the constant `21 49 ac _ f4`
-block is a candidate nonce source 🔴.
+≈ 1/sec (30→1475→9045 over 3 sessions) 🟡.
+
+### 5.8 Per-connection AUTH (the activation gate) 🟢 + heartbeat + bonding — issue #54
+⚠️ **CORRECTION:** the `01 01 <3-byte nonce>` arg is **NOT arbitrary** — it is a deterministic
+**challenge→response auth**, and it is what "activates" the ring for streaming (🟢, confirmed
+2026-06-16 `login_activate_20260616`). Sequence every connect: host `01 00 00` → ring
+`81 00 <chal> <xor>`; host must answer `01 01 <f(chal)> 00`. `f` is a **256-entry keyed table
+over the 8-bit challenge** (NOT linear/XOR/LCG). 24 (chal→resp) pairs captured, zero collisions
+(`b0→31 82 67` recurs across sessions 12 h apart; the 2026-06-16 login used `e5→52 0b e1`). See
+`Command.knownAuthNonces`.
+
+**Why this is the "open the official app to activate" gate:** OpenRingConn hardcodes
+`01 01 31 82 67` (= `f(0xb0)`), correct only when the challenge is `0xb0`. When the ring is in a
+strict state it demands the right `f(chal)` for the issued challenge, so our wrong answer → no
+streaming; a logged-in official app answers correctly → the ring streams (and we ride along while
+it stays unlocked). **To be standalone, OpenRingConn must compute `f(chal)` — recover `f` from the
+official APK (`com.gdjztech.ringconn`); 24/256 entries known from captures is not enough.** This is
+LOGIN/auth-tied, **not** app-startup and **not** a re-bond (see bonding below).
+
+**Heartbeat 🟢:** ring→host `11 00 <ctr> <tok> <xor>` (~2.5 min idle; `ctr` resets to 01 per
+connection; `tok` = the session token also in `0x10[1]`; `[last]`=XOR). Host replies a constant
+`91 00 00` (does not echo). `0x10` telemetry streams on its own ~40/110 s timer regardless of the
+ACK. (OpenRingConn now ACKs it — `Command.heartbeatAck`.)
+
+**Bonding 🟢 — NO CLOUD KEY (resolves the Phase-1 make-or-break unknown):** the link is **LE Secure
+Connections "Just Works"** (ring IOcap=NoInputNoOutput), LTK generated **locally via ECDH** during
+a one-time pairing (seen once at 17:51:58; every reconnect since is re-encryption from the stored
+LTK — 25 EncryptionChange events, zero re-pairings, incl. across the 2026-06-16 login). So offline
+decoding is sound and HCI-snoop ATT is plaintext. CoreBluetooth auto-bonds; there is **no app-layer
+key exchange to replicate for the bond** — the replicable gate is the `f(chal)` auth above.
 
 ## 6. Ground-truth captures needed (prioritized)
 
@@ -507,8 +534,10 @@ Each names the single capture that converts a 🟡/🔴 field into a decoded met
    the "12 h" is the epoch constant, not a decode error. 20 sync-open events confirm
    decoded UTC matches capture wall-clock to < 0.5 s. No 12 h offset in decoded data.
    (Issue #5 ✅ closed; see §5.6.)
-7. **Session nonce source:** correlate `01 01 <nonce>` against prior `0x81`/`0x10`
-   fields. *(Not required — nonce is arbitrary; §4.)*
+7. **Auth function `f(challenge)` (issue #54 — the activation gate):** `01 01 <nonce>` is a
+   deterministic challenge→response, NOT arbitrary (§5.8). 24/256 entries known from captures;
+   recover the full `f` by decompiling the official APK (`com.gdjztech.ringconn`) — needed to make
+   OpenRingConn stream standalone (without the official app activating the ring).
 8. **Skin temp + its transport:** temp is measured only at night yet is absent from a full
    activity/sleep/PPG sync, from `0x0900`, and from a capture with the Temperature screen
    open (that screen reads cache, no BLE). **Mac active-probing is ruled out** — data

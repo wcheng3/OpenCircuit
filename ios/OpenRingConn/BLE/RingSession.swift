@@ -53,6 +53,22 @@ final class RingSession: NSObject {
     private(set) var decodedEpochRecords = 0
     private(set) var storedMetricSamples = 0
     private(set) var ready = false
+    /// True once the notify subscription is CONFIRMED (`didUpdateNotificationStateFor` success) —
+    /// distinct from `ready`, which only means the notify/write characteristics were DISCOVERED.
+    /// An unsubscribed notify char silently drops every inbound frame.
+    private(set) var notifySubscribed = false
+    /// True when the link is up + subscribed but the ring delivers only `0x81` status replies and
+    /// NO data frames (`0x10`/`0x82`/`0x15`/`0x47`/`0x4c`/`0x11`) — the signature of a ring that
+    /// hasn't been activated/bonded by the official app (it accepts writes but answers nothing, so
+    /// Measure/Sync would just time out). Cleared the instant a data frame arrives. We INFER this
+    /// (don't claim to KNOW it's unactivated), per the `reconnectStalled` precedent.
+    private(set) var notStreaming = false
+    /// Whether any non-`0x81` (data/activity) frame has arrived since connect. Drives `notStreaming`
+    /// — the cold status reads always elicit `0x81`, so "frames arrived" alone can't tell us the
+    /// data path is alive; a DATA frame can.
+    private var gotDataFrame = false
+    /// Wall-clock of the last `0x11` heartbeat (optional liveness signal).
+    private(set) var lastHeartbeatAt: Date?
     /// True while the periodic auto-measure (not a user tap) is driving a live read, so the
     /// UI can show a subtle "auto-updating" cue instead of reading as a user measurement.
     private(set) var autoMeasuring = false
@@ -75,6 +91,13 @@ final class RingSession: NSObject {
     private var monitorTask: Task<Void, Never>?
     private var keepaliveTask: Task<Void, Never>?
     private var autoMeasureTask: Task<Void, Never>?
+    /// Fires once after the notify subscription is confirmed: if no DATA frame has arrived within
+    /// `firstFrameTimeout`, flips `notStreaming` (ring not activated/bonded). #54.
+    private var streamWatchdogTask: Task<Void, Never>?
+    /// Seconds after a confirmed subscription to wait for the ring's first DATA frame. The keepalive
+    /// starts writing status/fetch immediately on `ready`, so an activated ring answers well within
+    /// this; only an un-activated ring stays silent past it.
+    private static let firstFrameTimeout: TimeInterval = 10
 
     /// Cached nightly sleep window — skin-temp capture is gated to this span (see the
     /// descriptor handler). Daytime readings are too noisy/unpredictable (activity,
@@ -145,6 +168,7 @@ final class RingSession: NSObject {
         monitorTask?.cancel(); monitorTask = nil
         keepaliveTask?.cancel(); keepaliveTask = nil
         autoMeasureTask?.cancel(); autoMeasureTask = nil
+        streamWatchdogTask?.cancel(); streamWatchdogTask = nil
         syncTask?.cancel(); syncTask = nil
         monitoring = false
         livePreparing = false
@@ -263,6 +287,22 @@ final class RingSession: NSObject {
 
     func setLocalStore(_ localStore: LocalStore) {
         self.localStore = localStore
+    }
+
+    /// After the notify subscription is confirmed, wait `firstFrameTimeout` for the ring's first
+    /// DATA frame. If none arrives (only the cold `0x81` status replies), the ring is almost
+    /// certainly not activated/bonded — surface `notStreaming` so the UI can say "open the official
+    /// app once to activate" instead of letting Measure/Sync silently time out (#54).
+    private func startStreamWatchdog() {
+        streamWatchdogTask?.cancel()
+        streamWatchdogTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.firstFrameTimeout))
+            guard let self, !Task.isCancelled else { return }
+            if self.notifySubscribed, !self.gotDataFrame {
+                self.notStreaming = true
+                ringLog.notice("activation: subscribed but no data frame in \(Self.firstFrameTimeout, privacy: .public)s — ring likely not activated/bonded (#54)")
+            }
+        }
     }
 
     /// Idle keepalive — what makes OpenRingConn a *primary* tracker rather than an
@@ -696,6 +736,14 @@ extension RingSession: CBPeripheralDelegate {
         Task { @MainActor in
             self.lastFrame = data.map { String(format: "%02x", $0) }.joined(separator: " ")
             self.lastFrameAt = Date()   // freshness anchor for staleness + last-reading timestamp (#36)
+            // A DATA frame (anything but the cold `0x81` status reply, which even an un-activated ring
+            // answers) proves the ring's data path is live: clear `notStreaming` + satisfy the
+            // activation watchdog (#54). Guarded so `@Observable` doesn't republish on every frame.
+            if let op = bytes.first, op != 0x81 {
+                if !self.gotDataFrame { self.gotDataFrame = true }
+                if self.notStreaming { self.notStreaming = false }
+                self.streamWatchdogTask?.cancel(); self.streamWatchdogTask = nil
+            }
             // Frames arriving while the link isn't `ready` mean discovery didn't land on this
             // (restored) reconnect — re-run it so we can ack and the buttons enable. #reconnect
             if !self.ready { self.rediscoverIfNeeded() }
@@ -795,6 +843,14 @@ extension RingSession: CBPeripheralDelegate {
                 ringLog.notice("← 0x50 END-OF-HISTORY (records=\(self.bulkRecords.count)) raw=\(self.lastFrame ?? "", privacy: .public)")
                 self.handleEndOfHistory(data)   // finalize epoch session, gated persist (#24)
                 return
+            case 0x11:
+                // Ring heartbeat (unsolicited keepalive, ~2.5 min idle). The official app answers
+                // every `0x11` with a constant `91 00 00`; mirror that so an activated ring has no
+                // reason to throttle our stream (#54 / §5.8). Don't echo the counter/token.
+                self.lastHeartbeatAt = Date()
+                ringLog.debug("← 0x11 heartbeat, ack 91 00 00")
+                self.write(Command.heartbeatAck)
+                return
             default: break
             }
             guard let frame = Frame.parse(bytes) else { return }   // XOR-validate responses
@@ -828,6 +884,28 @@ extension RingSession: CBPeripheralDelegate {
                                 error: Error?) {
         if let error {
             ringLog.error("write FAILED: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Notify-subscription result (#54). `ready` only means the characteristic was DISCOVERED; this
+    /// is the first point we know whether notifications will actually flow. On failure (e.g. the
+    /// data char needs an encrypted/bonded link the ring won't grant when un-activated) we surface
+    /// `notStreaming` immediately instead of writing commands into the void; on success we arm the
+    /// first-DATA-frame watchdog.
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
+                                didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                                error: Error?) {
+        Task { @MainActor in
+            guard characteristic.uuid == self.notifyUUID else { return }
+            if let error {
+                ringLog.error("notify subscribe FAILED: \(error.localizedDescription, privacy: .public)")
+                self.notifySubscribed = false
+                self.notStreaming = true
+                return
+            }
+            self.notifySubscribed = characteristic.isNotifying
+            ringLog.notice("notify subscribed=\(characteristic.isNotifying)")
+            if characteristic.isNotifying { self.startStreamWatchdog() }
         }
     }
 

@@ -203,6 +203,10 @@ struct ContentView: View {
                     }
                 }
             }
+            // Link up + subscribed but the ring sends only status replies, no data (#54) — the
+            // un-activated/un-bonded signature. Until the activate step is reverse-engineered, the
+            // only fix is to open the official app once; say so instead of spinning forever.
+            if connected, session?.notStreaming == true { activationHint }
             if !connected {
                 Button {
                     scanner.start()
@@ -213,6 +217,22 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
             }
         }
+    }
+
+    /// Shown when `RingSession.notStreaming` — the ring is connected but not delivering data (not
+    /// yet activated/bonded by the official app). #54.
+    private var activationHint: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Ring isn't streaming").font(.subheadline.weight(.medium))
+                Text("Connected, but the ring isn't sending data. Open the official RingConn app once to activate it, then return here.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
     }
 
     /// A user (non-auto) HR measurement that's converging but hasn't locked yet (#45 C). The
@@ -318,7 +338,8 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(session?.ready != true || session?.syncing == true
-                      || session?.monitoring == true)   // stop live before syncing
+                      || session?.monitoring == true        // stop live before syncing
+                      || session?.notStreaming == true)     // a not-streaming ring would sync nothing (#54)
 
             if session?.monitoring == true {
                 Text("Stop live HR/SpO₂ before syncing.").font(.caption2).foregroundStyle(.secondary)

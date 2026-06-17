@@ -39,6 +39,12 @@ public enum Command {
     public static let poll: [UInt8] = [0x95, 0x00, 0x00]
     public static let pageAck47: [UInt8] = [0xC7, 0x00, 0x00]
     public static let pageAck4C: [UInt8] = [0xCC, 0x00, 0x00]
+    /// Reply to the ring's unsolicited `0x11` heartbeat (ring→host `11 00 <ctr> <tok> <xor>`).
+    /// The official app answers every heartbeat with a constant `91 00 00` (0x11+0x80, same
+    /// +0x80 response convention as 0x47→0xC7) — it does NOT echo the counter/token. 🟢 confirmed
+    /// `ppg_align_20260616` (§5.8). The ring's `0x10` telemetry streams on its own timer
+    /// regardless, but we ACK promptly so an activated ring has no reason to throttle us.
+    public static let heartbeatAck: [UInt8] = [0x91, 0x00, 0x00]
 
     /// Steps to enter live-HR mode, in the order the official app sends them (verified
     /// in the FR02.018 capture: open+drain history, then `d0 00 00` → `06 01 00` → fetch,
@@ -74,6 +80,35 @@ public enum Command {
     public static func syncUpToNow(now: Date = Date()) -> [UInt8] {
         syncSince(unixSeconds: Int(now.timeIntervalSince1970))
     }
+
+    /// Per-connection auth response: the ring challenges with `byte[2]` of its `81 00` reply, and
+    /// the official app answers `01 01 <f(challenge)> 00` where `f` is a deterministic 256-entry
+    /// keyed table (🟡 §5.7: e.g. `b0→31 82 67`, `86→db 2b 80`, `80→a9 a3 ef`, `52→27 7d 7f`).
+    /// The ring does NOT appear to strictly enforce it (our fixed `status1` = `f(0xb0)` has worked),
+    /// so this is informational until `f` is recovered from the APK. Returns the known nonce for a
+    /// challenge, else nil (caller falls back to `status1`). Bytes confirmed via challenge-response
+    /// correlation across 22 capture pairs; the full table needs the APK (issue #54).
+    public static func authNonce(forChallenge c: UInt8) -> [UInt8]? {
+        knownAuthNonces[c]
+    }
+    static let knownAuthNonces: [UInt8: [UInt8]] = [
+        0x0f: [0x4b, 0xcc, 0xe6], 0x1f: [0x9b, 0xc9, 0x31], 0x3b: [0x4b, 0xee, 0x0c],
+        0x3f: [0x67, 0x97, 0xa8], 0x49: [0x0b, 0x20, 0x6f], 0x52: [0x27, 0x7d, 0x7f],
+        0x78: [0xda, 0x5d, 0x57], 0x80: [0xa9, 0xa3, 0xef], 0x81: [0x4c, 0xc4, 0xae],
+        0x86: [0xdb, 0x2b, 0x80], 0x94: [0x71, 0xe9, 0x59], 0x96: [0x08, 0x60, 0xce],
+        0x9d: [0x6b, 0x6e, 0x2c], 0xa3: [0x5e, 0xb6, 0x1e], 0xb0: [0x31, 0x82, 0x67],
+        0xbc: [0x12, 0x52, 0xf2], 0xc2: [0x05, 0x33, 0x17], 0xc4: [0xa2, 0xf8, 0x27],
+        0xcb: [0x09, 0x88, 0x9c], 0xd8: [0x9c, 0x61, 0x91], 0xda: [0xf0, 0x1e, 0x88],
+        0xe3: [0x1b, 0xe9, 0x85], 0xe5: [0x52, 0x0b, 0xe1], 0xf9: [0x36, 0x09, 0xb2],
+    ]   // 24/256 entries from captures (incl. 2026-06-16 login e5→52 0b e1). Full f() needs the APK.
+
+    /// 🔴 UNKNOWN — the one-time login/activation command (if any) the official app sends so the
+    /// ring starts streaming to a fresh client. NOT present in any steady-state capture; reverse-
+    /// engineer from a first-time-provisioning / login btsnoop (issue #54), then fill + wire at the
+    /// discovery handler. Current evidence (§0/§5.8) points to the LE-SC bond itself being the gate
+    /// (local LTK, no cloud key) — in which case there is no app-layer command to send, only the
+    /// CoreBluetooth auto-bond. Placeholder so the call site can land before the bytes are known:
+    // public static func activate(/* token from login */) -> [UInt8] { … }
 }
 
 /// BLE transport handles (🟢). The ring is driven through this pair, not discrete
