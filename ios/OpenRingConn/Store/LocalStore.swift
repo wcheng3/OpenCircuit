@@ -94,6 +94,30 @@ final class StoredSleepSummary {
     var inBedEnd: Date = Date.distantPast
     var updatedAt: Date = Date.distantPast
 
+    // MARK: Wave-1 sleep analytics (#69/#70/#71). Every column is DEFAULTED so SwiftData
+    // lightweight migration can add it to stores written before it existed (cf. #21). A 0
+    // sentinel means "not computed" for the optional metrics (skin temp / scores), since a
+    // worn night's skin temp is always > 28 °C and the scores are 1…100.
+
+    /// Nightly MEAN sleeping skin temperature (°C), 0 = none. Baseline/offset are derived at
+    /// display time from the trailing nights' `skinTempC` (#69) — only the nightly value is stored.
+    var skinTempC: Double = 0
+    /// Composite 0–100 Sleep Score (#70), 0 = not computed.
+    var sleepScore: Int = 0
+    /// Overnight stress score 1–100 from sleep-window RMSSD (#71), 0 = not computed.
+    var stressScore: Int = 0
+    /// Subjective "how did you sleep?" rating 1–9 (#70), 0 = unrated. Set by the user; NEVER
+    /// overwritten by a re-sync.
+    var feelScore: Int = 0
+    /// Per-stage average HR (bpm), 0 = none (#70).
+    var hrDeep: Int = 0
+    var hrLight: Int = 0
+    var hrRem: Int = 0
+    var hrAwake: Int = 0
+    /// Per-epoch (2.5-min) movement levels 0/1/2 across the night (#70) — small enough to
+    /// persist so the movement chart redraws offline.
+    var movementLevels: [Int] = []
+
     init(
         night: Date,
         asleepMin: Int = 0,
@@ -104,7 +128,16 @@ final class StoredSleepSummary {
         efficiency: Double = 0,
         inBedStart: Date = Date.distantPast,
         inBedEnd: Date = Date.distantPast,
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        skinTempC: Double = 0,
+        sleepScore: Int = 0,
+        stressScore: Int = 0,
+        feelScore: Int = 0,
+        hrDeep: Int = 0,
+        hrLight: Int = 0,
+        hrRem: Int = 0,
+        hrAwake: Int = 0,
+        movementLevels: [Int] = []
     ) {
         self.night = night
         self.asleepMin = asleepMin
@@ -116,6 +149,15 @@ final class StoredSleepSummary {
         self.inBedStart = inBedStart
         self.inBedEnd = inBedEnd
         self.updatedAt = updatedAt
+        self.skinTempC = skinTempC
+        self.sleepScore = sleepScore
+        self.stressScore = stressScore
+        self.feelScore = feelScore
+        self.hrDeep = hrDeep
+        self.hrLight = hrLight
+        self.hrRem = hrRem
+        self.hrAwake = hrAwake
+        self.movementLevels = movementLevels
     }
 
     /// Rebuild a `SleepStaging.Summary` for the dashboard. `inBed` is recovered from the
@@ -154,6 +196,33 @@ final class StoredDaily {
         self.updatedAt = updatedAt
         self.healthWrittenSteps = healthWrittenSteps
     }
+}
+
+/// One auto-detected daytime nap (#76) — daytime stillness ≥ 15 min OUTSIDE the main overnight
+/// sleep window. Kept separate from `StoredSleepSummary` so naps never double-count against the
+/// night. Keyed by `start` and UPSERTED, so re-syncing the same day replaces rather than
+/// duplicates. `healthWritten` gates the (separate) Apple Health sleep write so a nap is written
+/// once. Every column is defaulted for SwiftData lightweight migration (cf. #21).
+@Model
+final class StoredNap {
+    @Attribute(.unique) var start: Date = Date.distantPast
+    var end: Date = Date.distantPast
+    var asleepMin: Int = 0
+    var isLongNap: Bool = false
+    var healthWritten: Bool = false
+    var updatedAt: Date = Date.distantPast
+
+    init(start: Date, end: Date, asleepMin: Int = 0, isLongNap: Bool = false,
+         healthWritten: Bool = false, updatedAt: Date = Date()) {
+        self.start = start
+        self.end = end
+        self.asleepMin = asleepMin
+        self.isLongNap = isLongNap
+        self.healthWritten = healthWritten
+        self.updatedAt = updatedAt
+    }
+
+    var durationMin: Int { max(Int(end.timeIntervalSince(start) / 60), 0) }
 }
 
 @MainActor
@@ -388,8 +457,21 @@ struct LocalStore {
     /// same night overwrites the existing row rather than inserting a duplicate. Does NOT
     /// touch the SyncCursor — gating sleep history for HealthKit stays in the `.sleep`
     /// watermark (`pendingHealthSleep`/`markSleepWritten`).
+    /// The Wave-1 analytics computed for a night alongside the stage totals (#69/#70/#71). All
+    /// optional — a value left at its default means "not computed" and the upsert leaves any
+    /// existing value untouched isn't needed (these are recomputed each sync), but `feelScore`
+    /// IS preserved across re-syncs since it's user-entered, not derived.
+    struct SleepNightExtras {
+        var skinTempC: Double = 0
+        var sleepScore: Int = 0
+        var stressScore: Int = 0
+        var hrByStage: [SleepStage: Int] = [:]
+        var movementLevels: [Int] = []
+    }
+
     func saveSleepSummary(_ summary: SleepStaging.Summary, night: Date,
-                          inBedStart: Date, inBedEnd: Date) throws {
+                          inBedStart: Date, inBedEnd: Date,
+                          extras: SleepNightExtras = SleepNightExtras()) throws {
         let dayStart = Calendar.current.startOfDay(for: night)
         let m = summary.minutes
         let descriptor = FetchDescriptor<StoredSleepSummary>(
@@ -404,8 +486,9 @@ struct LocalStore {
             existing.inBedStart = inBedStart
             existing.inBedEnd = inBedEnd
             existing.updatedAt = Date()
+            applyExtras(extras, to: existing)   // feelScore deliberately preserved
         } else {
-            context.insert(StoredSleepSummary(
+            let row = StoredSleepSummary(
                 night: dayStart,
                 asleepMin: m.asleep,
                 deepMin: m.deep,
@@ -415,9 +498,24 @@ struct LocalStore {
                 efficiency: summary.efficiency,
                 inBedStart: inBedStart,
                 inBedEnd: inBedEnd
-            ))
+            )
+            applyExtras(extras, to: row)
+            context.insert(row)
         }
         try context.save()
+    }
+
+    private func applyExtras(_ extras: SleepNightExtras, to row: StoredSleepSummary) {
+        // 0 = "not computed this pass" — keep any previously stored value rather than wiping it
+        // (a quick daytime live-read might re-stage the night with no temp/HRV coverage).
+        if extras.skinTempC > 0 { row.skinTempC = extras.skinTempC }
+        if extras.sleepScore > 0 { row.sleepScore = extras.sleepScore }
+        if extras.stressScore > 0 { row.stressScore = extras.stressScore }
+        if let v = extras.hrByStage[.asleepDeep] { row.hrDeep = v }
+        if let v = extras.hrByStage[.asleepCore] { row.hrLight = v }
+        if let v = extras.hrByStage[.asleepREM] { row.hrRem = v }
+        if let v = extras.hrByStage[.awake] { row.hrAwake = v }
+        if !extras.movementLevels.isEmpty { row.movementLevels = extras.movementLevels }
     }
 
     /// Most recent stored sleep summary (latest night), or nil.
@@ -426,6 +524,71 @@ struct LocalStore {
             sortBy: [SortDescriptor(\.night, order: .reverse)])
         descriptor.fetchLimit = 1
         return try context.fetch(descriptor).first
+    }
+
+    /// Trailing sleep summaries (latest first), for the rolling skin-temp baseline (#69) and
+    /// any short-window trend. Bounded so it never scans the whole table.
+    func recentSleepSummaries(limit: Int = 40) throws -> [StoredSleepSummary] {
+        var descriptor = FetchDescriptor<StoredSleepSummary>(
+            sortBy: [SortDescriptor(\.night, order: .reverse)])
+        descriptor.fetchLimit = limit
+        return try context.fetch(descriptor)
+    }
+
+    /// Persist the user's subjective sleep rating (1–9, #70) onto an existing night. No-op if
+    /// the night isn't in the store yet (a rating only makes sense once a night exists).
+    func setFeelScore(_ score: Int, night: Date) throws {
+        let dayStart = Calendar.current.startOfDay(for: night)
+        let descriptor = FetchDescriptor<StoredSleepSummary>(
+            predicate: #Predicate { $0.night == dayStart })
+        guard let row = try? context.fetch(descriptor).first else { return }
+        row.feelScore = max(0, min(score, 9))
+        row.updatedAt = Date()
+        try context.save()
+    }
+
+    // MARK: Naps (#76) — separate from the night so they never double-count
+
+    /// Upsert one auto-detected nap, keyed by start. A re-detected nap with the same start
+    /// updates in place; a genuinely new nap inserts. Preserves `healthWritten` on update so a
+    /// nap already mirrored to Health isn't re-written.
+    func saveNap(start: Date, end: Date, asleepMin: Int, isLongNap: Bool) throws {
+        let descriptor = FetchDescriptor<StoredNap>(predicate: #Predicate { $0.start == start })
+        if let existing = try? context.fetch(descriptor).first {
+            existing.end = end
+            existing.asleepMin = asleepMin
+            existing.isLongNap = isLongNap
+            existing.updatedAt = Date()
+        } else {
+            context.insert(StoredNap(start: start, end: end, asleepMin: asleepMin, isLongNap: isLongNap))
+        }
+        try context.save()
+    }
+
+    /// Naps that started on `day` (start-of-day bucket), latest first.
+    func naps(on day: Date = Date()) throws -> [StoredNap] {
+        let dayStart = Calendar.current.startOfDay(for: day)
+        let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
+        let descriptor = FetchDescriptor<StoredNap>(
+            predicate: #Predicate { $0.start >= dayStart && $0.start < dayEnd },
+            sortBy: [SortDescriptor(\.start, order: .reverse)])
+        return try context.fetch(descriptor)
+    }
+
+    /// Naps not yet mirrored to Apple Health (oldest first), for `HealthKitWriter.flushNaps`.
+    func pendingNaps() throws -> [StoredNap] {
+        let descriptor = FetchDescriptor<StoredNap>(
+            predicate: #Predicate { $0.healthWritten == false },
+            sortBy: [SortDescriptor(\.start, order: .forward)])
+        return try context.fetch(descriptor)
+    }
+
+    /// Mark a nap written to Apple Health so it isn't written again.
+    func markNapWritten(start: Date) throws {
+        let descriptor = FetchDescriptor<StoredNap>(predicate: #Predicate { $0.start == start })
+        guard let row = try? context.fetch(descriptor).first else { return }
+        row.healthWritten = true
+        try context.save()
     }
 
     /// Accumulate a step DELTA into the running total for `day`, UPSERTED by start-of-day. The

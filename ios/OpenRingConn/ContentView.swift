@@ -491,6 +491,7 @@ struct ContentView: View {
                     + (r.restingDays > 0 ? ", \(r.restingDays) resting HR" : "")
                     + (r.passiveHours > 0 ? ", \(r.passiveHours)h basal" : "")
                     + (r.activeKcal > 0 ? ", \(Int(r.activeKcal.rounded())) active kcal" : "")
+                    + (r.naps > 0 ? ", \(r.naps) nap\(r.naps == 1 ? "" : "s")" : "")
             }
         }
     }

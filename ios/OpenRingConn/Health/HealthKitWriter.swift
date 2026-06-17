@@ -83,9 +83,10 @@ final class HealthKitWriter {
         var samples = 0, sleepSegments = 0, steps = 0
         var restingDays = 0, passiveHours = 0
         var activeKcal = 0.0
+        var naps = 0
         var wroteAnything: Bool {
             samples > 0 || sleepSegments > 0 || steps > 0
-                || restingDays > 0 || passiveHours > 0 || activeKcal > 0
+                || restingDays > 0 || passiveHours > 0 || activeKcal > 0 || naps > 0
         }
     }
 
@@ -111,6 +112,9 @@ final class HealthKitWriter {
             do { try await write(sleep: pendingSleep); try store.markSleepWritten(pendingSleep); result.sleepSegments = pendingSleep.count }
             catch { /* leave the .sleep cursor; retry next flush */ }
         }
+        // Naps (#76): each carries its own `healthWritten` flag (NOT the night's `.sleep` cursor),
+        // so a daytime nap and the overnight night write independently and never collide.
+        result.naps = await flushNaps(store: store)
         // Steps: the store holds the authoritative pending delta (total − already-written), so
         // gate on it directly — no live reading needed (this also lets a launch-time flush push
         // steps the background refresh persisted). HealthKit SUMS stepCount, so writing the
@@ -135,6 +139,27 @@ final class HealthKitWriter {
         result.passiveHours = await flushPassiveCalories(profile: profile)
         result.activeKcal = await flushActiveCalories(local: store, profile: profile)
         return result
+    }
+
+    /// Write each pending nap to Apple Health as sleep (a coarse inBed + asleepCore pair over the
+    /// nap window) and mark it written, returning the count. Gated by each nap's own
+    /// `healthWritten` flag — independent of the night's `.sleep` cursor — so naps and the night
+    /// never collide. Best-effort: a failed save leaves the flag so it retries next flush.
+    private func flushNaps(store: LocalStore) async -> Int {
+        guard let pending = try? store.pendingNaps(), !pending.isEmpty else { return 0 }
+        var written = 0
+        for nap in pending {
+            let segs = [
+                SleepSegment(start: nap.start, end: nap.end, stage: .inBed),
+                SleepSegment(start: nap.start, end: nap.end, stage: .asleepCore),
+            ]
+            do {
+                try await write(sleep: segs)
+                try store.markNapWritten(start: nap.start)
+                written += 1
+            } catch { break }   // stop on first failure; unwritten naps retry next flush
+        }
+        return written
     }
 
     func requestAuthorization() async throws {

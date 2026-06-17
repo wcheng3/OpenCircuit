@@ -20,8 +20,13 @@ import OpenRingKit
 /// Stages (Deep/Light/REM/Awake) are an on-device ESTIMATE — the ring doesn't transmit a
 /// hypnogram (PROTOCOL.md §5.3) — so the card labels them "est.".
 struct SleepCardView: View {
-    /// Latest persisted night (capped at 1) — the offline source of truth.
+    @Environment(\.modelContext) private var modelContext
+    /// Trailing persisted nights (latest first) — the offline source of truth. The window is
+    /// wider than 1 so the rolling skin-temp baseline + the offset mini-chart (#69) have history;
+    /// `latest` (= `storedSleep.first`) still drives the headline night.
     @Query private var storedSleep: [StoredSleepSummary]
+    /// Today's auto-detected naps (#76), latest first.
+    @Query private var todayNaps: [StoredNap]
     /// Freshly staged segments from the just-finished sync (empty when none / after disconnect).
     /// Preferred over the store so a completed sync updates the card immediately.
     var liveSegments: [SleepSegment]
@@ -34,11 +39,20 @@ struct SleepCardView: View {
     /// Days of HR/HRV/SpO₂ history scanned before the precise night window is applied in memory.
     private static let vitalsWindowDays: TimeInterval = 3
 
+    /// Trailing nights queried for the baseline + temp chart (#69). 35 ≥ the 30-night baseline.
+    private static let historyNights = 35
+
     init(liveSegments: [SleepSegment] = []) {
         self.liveSegments = liveSegments
         var d = FetchDescriptor<StoredSleepSummary>(sortBy: [SortDescriptor(\.night, order: .reverse)])
-        d.fetchLimit = 1
+        d.fetchLimit = Self.historyNights
         _storedSleep = Query(d)
+
+        // Naps that started today (#76).
+        let dayStart = Calendar.current.startOfDay(for: Date())
+        _todayNaps = Query(FetchDescriptor<StoredNap>(
+            predicate: #Predicate { $0.start >= dayStart },
+            sortBy: [SortDescriptor(\.start, order: .reverse)]))
 
         // Anchor the window to the start of the current hour so the descriptor stays stable across
         // rapid re-renders (re-fetching hourly or when data changes), not on every render.
@@ -67,6 +81,11 @@ struct SleepCardView: View {
         /// relative term, so a pre-midnight night isn't mislabeled "yesterday".
         let wakeKnown: Bool
     }
+
+    /// Latest persisted night — the source of the detail metrics (#69/#70/#71). Aligns with the
+    /// displayed `night`: a fresh sync upserts it before the card settles, and the store fallback
+    /// already reads from it.
+    private var latest: StoredSleepSummary? { storedSleep.first }
 
     /// The night to show: prefer this connection's freshly synced staging (instant), else the
     /// most recent persisted night (survives all day / offline). Only ever a real night (asleep > 0).
@@ -118,12 +137,14 @@ struct SleepCardView: View {
     private func content(_ night: Night) -> some View {
         let s = night.summary
         let m = s.minutes
-        // Headline: total time asleep.
+        // Headline: total time asleep + the composite Sleep Score badge (#70).
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text("\(m.asleep / 60)h \(m.asleep % 60)m")
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .monospacedDigit().contentTransition(.numericText())
             Text("asleep").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+            Spacer()
+            if let score = latest?.sleepScore, score > 0 { scoreBadge(score) }
         }
         stageBar(m)
         stageLegend(m)
@@ -133,9 +154,252 @@ struct SleepCardView: View {
         if let avg = overnightAverages(night) {
             overnightVitals(avg)
         }
+        // Detail metrics (#69/#70/#71/#76), grouped so this builder stays under the ViewBuilder
+        // child limit. All read from the latest persisted summary, so they survive offline.
+        detailSection()
         // Footer: sleep window · efficiency · est. caveat.
         Text(footer(night).joined(separator: " · "))
             .font(.caption2).foregroundStyle(.tertiary)
+    }
+
+    /// The Wave-1 sleep-detail rows in one group: per-stage HR, overnight stress, skin-temp
+    /// baseline, movement chart, naps, and the subjective rating.
+    @ViewBuilder
+    private func detailSection() -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            perStageHR()       // #70 per-stage average HR
+            stressRow()        // #71 overnight stress
+            skinTempSection()  // #69 nightly skin-temp + baseline offset + mini chart
+            movementSection()  // #70 2.5-min / 3-level movement chart
+            napsRow()          // #76 daytime naps
+            feelRating()       // #70 subjective rating
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: Sleep Score badge (#70)
+
+    /// Tier color for a 0–100 composite Sleep Score (≥85 / 70–84 / <70).
+    private func scoreColor(_ score: Int) -> Color {
+        switch SleepScore.Tier.of(score) {
+        case .excellent: return .green
+        case .good: return .teal
+        case .needsImprovement: return .orange
+        }
+    }
+
+    private func scoreBadge(_ score: Int) -> some View {
+        VStack(spacing: 0) {
+            Text("\(score)")
+                .font(.system(size: 22, weight: .bold, design: .rounded)).monospacedDigit()
+            Text("score").font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 10).fill(scoreColor(score).opacity(0.18)))
+        .foregroundStyle(scoreColor(score))
+    }
+
+    // MARK: Per-stage HR (#70)
+
+    @ViewBuilder
+    private func perStageHR() -> some View {
+        let stages: [(name: String, bpm: Int)] = [
+            ("Deep", latest?.hrDeep ?? 0), ("Light", latest?.hrLight ?? 0),
+            ("REM", latest?.hrRem ?? 0), ("Awake", latest?.hrAwake ?? 0),
+        ].filter { $0.1 > 0 }
+        if !stages.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Avg HR by stage").font(.caption2).foregroundStyle(.secondary)
+                HStack(spacing: 16) {
+                    ForEach(stages, id: \.name) { stage in stat(stage.name, "\(stage.bpm)", "bpm") }
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    // MARK: Overnight stress (#71)
+
+    @ViewBuilder
+    private func stressRow() -> some View {
+        if let score = latest?.stressScore, score > 0 {
+            let band = SleepStress.Band.of(score)
+            HStack(spacing: 6) {
+                Image(systemName: "waveform.path.ecg").font(.caption2).foregroundStyle(stressColor(band))
+                Text("Overnight stress").font(.caption2).foregroundStyle(.secondary)
+                Text("\(score)").font(.caption.weight(.semibold)).monospacedDigit()
+                Text(band.label).font(.caption2).foregroundStyle(stressColor(band))
+                Text("· est.").font(.caption2).foregroundStyle(.tertiary)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func stressColor(_ band: SleepStress.Band) -> Color {
+        switch band {
+        case .relaxed: return .green
+        case .normal: return .teal
+        case .medium: return .orange
+        case .high: return .red
+        }
+    }
+
+    // MARK: Skin-temperature baseline + nightly deviation (#69)
+
+    /// Build a `SkinTempBaseline.NightReport` for the latest night from the trailing stored nights.
+    private var tempReport: SkinTempBaseline.NightReport? {
+        guard let latest, latest.skinTempC > 0 else { return nil }
+        let priorNights = storedSleep
+            .filter { $0.skinTempC > 0 && $0.night != latest.night }
+            .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }
+        return SkinTempBaseline.report(tonight: latest.skinTempC, priorNights: priorNights)
+    }
+
+    @ViewBuilder
+    private func skinTempSection() -> some View {
+        if let r = tempReport {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "thermometer.medium").font(.caption2).foregroundStyle(.pink)
+                    Text("Skin temp").font(.caption2).foregroundStyle(.secondary)
+                    Text(String(format: "%.1f°C", r.nightlyC))
+                        .font(.caption.weight(.semibold)).monospacedDigit()
+                    if let off = r.offsetC {
+                        Text(String(format: "%+.1f°C vs baseline", off))
+                            .font(.caption2).foregroundStyle(tempColor(r.band))
+                    } else {
+                        Text("baseline building").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                tempChart()
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func tempColor(_ band: SkinTempBaseline.DeviationBand?) -> Color {
+        switch band {
+        case .abnormalRise: return .red
+        case .abnormalDrop: return .blue
+        default: return .secondary
+        }
+    }
+
+    /// Bar color for a nightly offset: green within ±1 °C, red/blue when abnormal.
+    private func tempBarColor(_ off: Double) -> Color {
+        let band = SkinTempBaseline.deviationBand(offset: off)
+        return band == .normal ? .green : tempColor(band)
+    }
+
+    /// Compact baseline chart (#69): each recent night's offset from the rolling baseline as a
+    /// bar above (warmer) / below (cooler) a center baseline line.
+    @ViewBuilder
+    private func tempChart() -> some View {
+        let nights = storedSleep.filter { $0.skinTempC > 0 }
+        if nights.count >= SkinTempBaseline.minBaselineNights,
+           let baseline = SkinTempBaseline.baseline(
+                priorNights: nights.map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }) {
+            // Oldest→newest, last ~14 nights, as offsets from the baseline.
+            let points = nights.sorted { $0.night < $1.night }.suffix(14).map { $0.skinTempC - baseline }
+            let maxAbs = max(points.map { abs($0) }.max() ?? 0.5, 0.5)
+            GeometryReader { geo in
+                let halfH = geo.size.height / 2
+                HStack(alignment: .center, spacing: 2) {
+                    ForEach(Array(points.enumerated()), id: \.offset) { _, off in
+                        let frac = min(max(off / maxAbs, -1), 1)         // -1…1
+                        let barH = max(abs(frac) * halfH, 1)
+                        VStack(spacing: 0) {
+                            ZStack(alignment: .bottom) {
+                                Color.clear
+                                if frac >= 0 { Rectangle().fill(tempBarColor(off)).frame(height: barH) }
+                            }.frame(height: halfH)
+                            ZStack(alignment: .top) {
+                                Color.clear
+                                if frac < 0 { Rectangle().fill(tempBarColor(off)).frame(height: barH) }
+                            }.frame(height: halfH)
+                        }
+                    }
+                }
+                .overlay(alignment: .center) {
+                    Rectangle().fill(Color.secondary.opacity(0.4)).frame(height: 1)
+                }
+            }
+            .frame(height: 24)
+        }
+    }
+
+    // MARK: Body-movement chart (#70)
+
+    @ViewBuilder
+    private func movementSection() -> some View {
+        let levels = latest?.movementLevels ?? []
+        if !levels.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Movement").font(.caption2).foregroundStyle(.secondary)
+                GeometryReader { geo in
+                    HStack(spacing: 1) {
+                        ForEach(Array(levels.enumerated()), id: \.offset) { _, lvl in
+                            Rectangle().fill(movementColor(lvl))
+                                .frame(width: max(geo.size.width / CGFloat(levels.count) - 1, 0.5))
+                        }
+                    }
+                }
+                .frame(height: 16)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func movementColor(_ level: Int) -> Color {
+        switch level {
+        case 2: return .orange       // active
+        case 1: return .yellow       // light
+        default: return Color.secondary.opacity(0.25)   // still
+        }
+    }
+
+    // MARK: Naps (#76)
+
+    @ViewBuilder
+    private func napsRow() -> some View {
+        if !todayNaps.isEmpty {
+            let totalMin = todayNaps.reduce(0) { $0 + $1.durationMin }
+            HStack(spacing: 6) {
+                Image(systemName: "sun.max.fill").font(.caption2).foregroundStyle(.yellow)
+                Text("Naps today").font(.caption2).foregroundStyle(.secondary)
+                Text("\(todayNaps.count)").font(.caption.weight(.semibold)).monospacedDigit()
+                Text("· \(totalMin)m total").font(.caption2).foregroundStyle(.secondary)
+                Text("· est.").font(.caption2).foregroundStyle(.tertiary)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    // MARK: Subjective rating (#70)
+
+    @ViewBuilder
+    private func feelRating() -> some View {
+        if let latest {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("How did you sleep?").font(.caption2).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    ForEach(1...9, id: \.self) { n in
+                        Circle()
+                            .fill(n <= latest.feelScore ? Color.indigo : Color.secondary.opacity(0.18))
+                            .frame(width: 16, height: 16)
+                            .overlay(Text("\(n)").font(.system(size: 9))
+                                .foregroundStyle(n <= latest.feelScore ? .white : .secondary))
+                            .onTapGesture { setFeel(n, night: latest.night) }
+                    }
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func setFeel(_ score: Int, night: Date) {
+        try? LocalStore(modelContext).setFeelScore(score, night: night)
     }
 
     /// Mean HR (bpm) / HRV (ms) / SpO₂ (%) over the night's in-bed window, from the bounded

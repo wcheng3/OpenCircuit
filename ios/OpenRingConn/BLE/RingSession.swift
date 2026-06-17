@@ -704,9 +704,77 @@ final class RingSession: NSObject {
             // remains the upsert key.
             let start = stagedSegments.map(\.start).min() ?? Date()
             let end = stagedSegments.map(\.end).max() ?? start
-            try? localStore.saveSleepSummary(summary, night: start, inBedStart: start, inBedEnd: end)
+            let extras = computeSleepExtras(summary: summary, start: start, end: end, store: localStore)
+            try? localStore.saveSleepSummary(summary, night: start, inBedStart: start, inBedEnd: end,
+                                             extras: extras)
         }
+        // Naps are detected over the whole drained window (independent of the overnight gate)
+        // so a daytime-only sync still records them, never folded into the main night (#76).
+        persistNaps(store: localStore)
         // Steps are accumulated live in didUpdateValue (addDailySteps) — nothing to do here.
+    }
+
+    /// Compute the Wave-1 sleep analytics for the night being persisted (#69/#70/#71): nightly
+    /// skin-temp mean + rolling-baseline offset, the 6-factor composite Sleep Score, overnight
+    /// stress from sleep-window RMSSD, per-stage average HR, and the movement timeline. All from
+    /// already-decoded data; values are estimates (labeled as such in the UI).
+    private func computeSleepExtras(summary: SleepStaging.Summary, start: Date, end: Date,
+                                    store: LocalStore) -> LocalStore.SleepNightExtras {
+        var extras = LocalStore.SleepNightExtras()
+        let window = DateInterval(start: start, end: max(end, start))
+
+        // Skin temp (#69): nightly mean from the persisted worn overnight readings.
+        let tempC = (try? store.samples(kind: .temperature, from: start, to: end))?.map(\.value)
+        let nightlyTemp = tempC.flatMap { SkinTempBaseline.nightlyMean($0) }
+        if let nightlyTemp { extras.skinTempC = nightlyTemp }
+
+        // Rolling baseline from PRIOR nights (exclude tonight's day), for the composite temp factor.
+        let tonightDay = Calendar.current.startOfDay(for: start)
+        let priorNights: [SkinTempBaseline.NightlyTemp] = ((try? store.recentSleepSummaries(limit: 40)) ?? [])
+            .filter { $0.skinTempC > 0 && Calendar.current.startOfDay(for: $0.night) != tonightDay }
+            .map { SkinTempBaseline.NightlyTemp(night: $0.night, celsius: $0.skinTempC) }
+        let baseline = SkinTempBaseline.baseline(priorNights: priorNights)
+        let tempOffset = (nightlyTemp != nil && baseline != nil) ? nightlyTemp! - baseline! : nil
+
+        // Per-stage HR + movement (#70).
+        let hrByStage = SleepDetailMetrics.averageHRByStage(records: bulkRecords, segments: stagedSegments)
+        extras.hrByStage = hrByStage
+        extras.movementLevels = SleepDetailMetrics.movementSummary(records: bulkRecords, in: window).levels
+
+        // Overnight stress (#71): median sleep-window RMSSD → band score.
+        let rmssd = bulkRecords.filter { window.contains($0.date()) }.compactMap { $0.hrvRMSSD }
+        if let stress = SleepStress.overnightScore(rmssd: rmssd) { extras.stressScore = stress }
+
+        // Resting/asleep HR for the composite HR factor (sleep mean → low-activity floor).
+        let nightHR = bulkRecords.compactMap { r -> HRSample? in
+            guard let hr = r.heartRate else { return nil }
+            let t = r.date()
+            return HRSample(bpm: hr, start: t, end: t)
+        }
+        let restingHR = RestingHR.value(hr: nightHR, sleep: stagedSegments)
+
+        // Composite 0–100 Sleep Score (#70).
+        let composite = SleepScore.composite(.init(
+            totalAsleep: summary.totalAsleep, timeAwake: summary.awake, efficiency: summary.efficiency,
+            deep: summary.deep, light: summary.light, rem: summary.rem,
+            restingHR: restingHR, tempOffsetC: tempOffset))
+        extras.sleepScore = composite.score
+        return extras
+    }
+
+    /// Detect daytime naps over the drained records and persist them (#76). Excludes the main
+    /// overnight block so naps never double-count against the night; the wear gate (#41) drops
+    /// off-wrist/charging stillness the same way the night does.
+    private func persistNaps(store: LocalStore) {
+        guard !bulkRecords.isEmpty else { return }
+        let main = BulkSleep.mainSleep(from: bulkRecords, temperatures: wearTemperatureSamples())
+        let naps = NapDetection.naps(from: bulkRecords, mainSleep: main,
+                                     temperatures: wearTemperatureSamples())
+        for nap in naps {
+            try? store.saveNap(start: nap.start, end: nap.end,
+                               asleepMin: Int((nap.asleep / 60).rounded()),
+                               isLongNap: nap.isLongNap)
+        }
     }
 
     // MARK: Step counter state (cross-session, #34)

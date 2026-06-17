@@ -8,7 +8,7 @@ final class HealthWatermarkTests: XCTestCase {
     private func makeStore() throws -> LocalStore {
         let container = try ModelContainer(
             for: StoredSample.self, StoredCursor.self,
-            StoredSleepSummary.self, StoredDaily.self,
+            StoredSleepSummary.self, StoredDaily.self, StoredNap.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         return LocalStore(container.mainContext)
