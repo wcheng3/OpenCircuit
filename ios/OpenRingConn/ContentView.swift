@@ -40,6 +40,7 @@ struct ContentView: View {
                 VStack(spacing: 16) {
                     connectionCard
                     vitalsCard
+                    sleepCard
                     caloriesCard
                     syncCard
                     debugCard
@@ -331,16 +332,15 @@ struct ContentView: View {
     private var vitalsCard: some View {
         card {
             Text("VITALS").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            VitalsTableView(session: session, sleep: sleepSummary)
+            VitalsTableView(session: session)
         }
     }
 
-    /// Sleep summary (total asleep + Deep/Light/REM/Awake breakdown) for the most recent
-    /// night, from the staged segments. Stages are an on-device ESTIMATE — the ring doesn't
-    /// transmit stage labels (PROTOCOL.md §5.3) — so the dashboard labels them "est.".
-    private var sleepSummary: SleepStaging.Summary? {
-        guard let segs = session?.stagedSegments, !segs.isEmpty else { return nil }
-        return SleepStaging.summary(segs)
+    /// Dedicated, always-visible sleep section below vitals. Reads the persisted nightly summary
+    /// so the most recent night stays on screen all day — across reconnects and syncs — and
+    /// reflects a just-finished sync instantly via the live staged segments. (See SleepCardView.)
+    private var sleepCard: some View {
+        SleepCardView(liveSegments: session?.stagedSegments ?? [])
     }
 
     /// Calories on the home page (was buried in the profile page). Headline is today's
@@ -405,44 +405,13 @@ struct ContentView: View {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
 
-            if let samples = session?.historySamples, !samples.isEmpty {
-                Divider()
-                metricSummary(samples)
-                if let inBed = session?.sleepSegments.first(where: { $0.stage == .inBed }) {
-                    LabeledContent("Sleep window") {
-                        Text("\(inBed.start.formatted(date: .omitted, time: .shortened))–\(inBed.end.formatted(date: .omitted, time: .shortened))")
-                    }
-                    .font(.subheadline)
-                }
-                if let staged = session?.stagedSegments, !staged.isEmpty {
-                    stageBar(staged)
-                }
+            // The Health mirror controls. What this sync pulled (avg HR/HRV/SpO₂) now lives with
+            // the night it describes — the Sleep card's "overnight average" row — instead of here,
+            // where the overnight averages read as a current "latest from the ring" value and
+            // contradicted the live Vitals readings (HR/SpO₂ are also measured on demand).
+            if session?.historySamples.isEmpty == false {
                 Divider()
                 healthRow
-            }
-        }
-    }
-
-    /// avg HR / HRV / SpO2 across the synced samples.
-    private func metricSummary(_ samples: [QuantitySample]) -> some View {
-        func avg(_ kind: MetricKind, scale: Double = 1) -> String {
-            let vs = samples.filter { $0.kind == kind }.map(\.value)
-            guard !vs.isEmpty else { return "—" }
-            return String(Int((vs.reduce(0, +) / Double(vs.count)) * scale))
-        }
-        return HStack(spacing: 24) {
-            stat("HR", "\(avg(.heartRate))", "bpm")
-            stat("HRV", "\(avg(.hrvSDNN))", "ms")
-            stat("SpO₂", "\(avg(.spo2, scale: 100))", "%")
-        }
-    }
-
-    private func stat(_ label: String, _ value: String, _ unit: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 2) {
-                Text(value).font(.title2.weight(.semibold)).monospacedDigit()
-                Text(unit).font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
@@ -472,42 +441,6 @@ struct ContentView: View {
             }
             if let lastWrite {
                 Text(lastWrite).font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    // MARK: Stage bar (experimental)
-
-    private func stageBar(_ segs: [SleepSegment]) -> some View {
-        let order: [(SleepStage, Color, String)] = [
-            (.asleepDeep, .indigo, "Deep"), (.asleepCore, .teal, "Light"),
-            (.asleepREM, .purple, "REM"), (.awake, .orange, "Awake"),
-        ]
-        func mins(_ s: SleepStage) -> Double {
-            segs.filter { $0.stage == s }.reduce(0) { $0 + $1.duration } / 60
-        }
-        let total = order.reduce(0.0) { $0 + mins($1.0) }
-        return VStack(alignment: .leading, spacing: 6) {
-            Text("Stages (experimental)").font(.caption).foregroundStyle(.secondary)
-            GeometryReader { geo in
-                HStack(spacing: 1) {
-                    ForEach(order, id: \.0) { stage, color, _ in
-                        Rectangle().fill(color)
-                            .frame(width: total > 0 ? geo.size.width * mins(stage) / total : 0)
-                    }
-                }
-            }
-            .frame(height: 12)
-            .clipShape(Capsule())
-            HStack(spacing: 12) {
-                ForEach(order, id: \.0) { stage, color, name in
-                    if mins(stage) > 0 {
-                        HStack(spacing: 4) {
-                            Circle().fill(color).frame(width: 7, height: 7)
-                            Text("\(name) \(Int(mins(stage)))m").font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }
-                }
             }
         }
     }

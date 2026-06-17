@@ -21,15 +21,14 @@ struct VitalsTableView: View {
     /// Temperature samples over the last few days — narrowed in memory to the precise night
     /// window for the overnight average (the exact window depends on async @State).
     @Query private var recentTemp: [StoredSample]
-    /// Latest persisted sleep summary (capped at 1) — the offline fallback for `sleep`.
+    /// Latest persisted sleep summary (capped at 1). The sleep BREAKDOWN now lives in the
+    /// dedicated SleepCardView; this query is retained only to bound the skin-temp night window
+    /// (`nightWindow`) to the most recent night's actual onset/wake span.
     @Query private var storedSleep: [StoredSleepSummary]
     /// Latest persisted daily rollup (capped at 1) — the offline fallback for live steps.
     @Query private var storedDaily: [StoredDaily]
     /// Live session (optional) — its readings override stored ones while connected.
     var session: RingSession?
-    /// LIVE sleep summary for the most recent night (total asleep + estimated stage
-    /// breakdown). When nil (no live session), `effectiveSleep` falls back to the store.
-    var sleep: SleepStaging.Summary?
 
     /// The user's sleep window (from the manual schedule, or the iOS Sleep schedule once
     /// HealthKit is authorized) — the preferred bound for the night-temp window. Resolved
@@ -45,9 +44,8 @@ struct VitalsTableView: View {
     /// versus all history.
     private static let tempWindowDays: TimeInterval = 3
 
-    init(session: RingSession? = nil, sleep: SleepStaging.Summary? = nil) {
+    init(session: RingSession? = nil) {
         self.session = session
-        self.sleep = sleep
 
         // Anchor the time windows to the start of the current hour so the @Query descriptors stay
         // stable across rapid SwiftUI re-renders (only re-fetching hourly or when data changes),
@@ -91,13 +89,6 @@ struct VitalsTableView: View {
             sortBy: [SortDescriptor(\.start, order: .reverse)])
         d.fetchLimit = 1
         return d
-    }
-
-    /// Prefer the live session summary; fall back to the latest stored night offline.
-    private var effectiveSleep: SleepStaging.Summary? {
-        if let sleep { return sleep }
-        guard let s = storedSleep.first, s.asleepMin > 0 else { return nil }
-        return s.asSummary
     }
 
     /// Prefer the ring's live onboard count; fall back to the stored count ONLY if it's
@@ -164,21 +155,6 @@ struct VitalsTableView: View {
         return lows.min().map { Int($0) }
     }
 
-    // MARK: First-run empty-state (#58)
-
-    /// True once at least one genuinely sleep-derived sample has been persisted (HRV, RR, or a
-    /// stored sleep summary). Resting HR is deliberately EXCLUDED: it's the min of ANY heart-rate
-    /// sample in the last 24 h, and an on-demand "Measure HR" tap persists a `.heartRate` sample on
-    /// disconnect (RingSession.swift) — so a single daytime reading would otherwise flip this true
-    /// before any overnight sync, suppressing `overnightSyncHint` and reverting the Sleep row to a
-    /// bare "—" WHILE HRV/RR still show "after overnight sync" (a contradictory first-run UI). The
-    /// four overnight rows (HRV, Resting HR, Respiratory Rate, Sleep) reflect this data; when false
-    /// they show the first-run empty state rather than reading as genuinely missing today's value.
-    /// (#58)
-    private var hasSleepVitals: Bool {
-        latestReading(.hrvSDNN) != nil || latestReading(.respiratoryRate) != nil || storedSleep.first != nil
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             measurableRow("Heart Rate", value: hrText, mode: .hr, active: hrActive,
@@ -192,7 +168,7 @@ struct VitalsTableView: View {
             divider
             // Sleep-derived rows: caption "after overnight sync" on each bare "—" row so the
             // user understands WHY they're empty, rather than seeing a bare dash with no context.
-            // The overnightSyncHint in the sleep section below gives the full explanation. (#58)
+            // The full explanation lives in the dedicated Sleep card's empty state below. (#58)
             row("HRV", value: valueText(.hrvSDNN) { "\(Int($0)) ms" },
                 time: nightlyWhen(.hrvSDNN) ?? "after overnight sync")
             divider
@@ -203,8 +179,6 @@ struct VitalsTableView: View {
             divider
             row("Respiratory Rate", value: valueText(.respiratoryRate) { String(format: "%.1f /min", $0) },
                 time: nightlyWhen(.respiratoryRate) ?? "after overnight sync")
-            divider
-            sleepSection
         }
         .padding(.vertical, 4)
         // Resolve the (async) sleep-schedule window once the view appears. The selector
@@ -212,54 +186,6 @@ struct VitalsTableView: View {
         .task(id: "\(sleepEnabled)-\(bedMinutes)-\(wakeMinutes)") {
             scheduleWindow = await SleepSchedule.current(forNightEndingNear: Date())
         }
-    }
-
-    /// Sleep: total asleep + estimated Deep/Light/REM/Awake breakdown (stages are an
-    /// on-device estimate — the ring doesn't send stage labels).
-    @ViewBuilder private var sleepSection: some View {
-        if let s = effectiveSleep, s.minutes.asleep > 0 {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack {
-                    Text("Sleep").font(.subheadline)
-                    Spacer()
-                    Text("\(s.minutes.asleep / 60)h \(s.minutes.asleep % 60)m")
-                        .font(.subheadline.weight(.semibold)).monospacedDigit()
-                }
-                Text("Deep \(s.minutes.deep)m · Light \(s.minutes.light)m · REM \(s.minutes.rem)m · Awake \(s.minutes.awake)m")
-                    .font(.caption2).foregroundStyle(.secondary)
-                Text("est.\(sleepWhen.map { " · \($0)" } ?? "") · \(Int((s.efficiency * 100).rounded()))% efficiency")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
-            .padding(.vertical, 8)
-        } else if hasSleepVitals {
-            // Syncs have run but no sleep detected for the most recent night.
-            row("Sleep", value: "—", time: nil)
-        } else {
-            // No overnight sync has completed yet — show an informative empty state that groups
-            // the explanation for all four sleep-derived rows. Distinct from `activationHint`
-            // (orange warning, connection-level) — this is informational, data-level. (#58)
-            overnightSyncHint
-        }
-    }
-
-    /// Empty-state shown in the sleep section when no overnight sync has completed. Groups the
-    /// explanation for HRV, Resting HR, Respiratory Rate, and Sleep in one place so the user
-    /// sees a clear message rather than four bare "—" rows with no context. (#58)
-    @ViewBuilder private var overnightSyncHint: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "moon.zzz")
-                .font(.subheadline)
-                .foregroundStyle(.indigo)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("HRV · Resting HR · Respiratory Rate · Sleep")
-                    .font(.subheadline.weight(.medium))
-                Text("Available after your first overnight sync. Wear the ring to bed and connect in the morning.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 8)
     }
 
     /// SpO₂ row with estimate caveat: live SpO₂ is a single-window measurement (🟡),
@@ -457,14 +383,6 @@ struct VitalsTableView: View {
         let today = Calendar.current.startOfDay(for: Date())
         guard let d = storedDaily.first, d.day == today, d.steps > 0 else { return nil }
         return Self.rel.localizedString(for: d.updatedAt, relativeTo: Date())
-    }
-
-    /// For a STORED (not live) sleep summary, the night it covers, so a days-old summary
-    /// isn't shown as if it were last night. nil when the value is live.
-    private var sleepWhen: String? {
-        guard sleep == nil, let s = storedSleep.first else { return nil }
-        let f = DateFormatter(); f.dateFormat = "MMM d"
-        return f.string(from: s.night)
     }
 
     private func tempString(_ celsius: Double) -> String {

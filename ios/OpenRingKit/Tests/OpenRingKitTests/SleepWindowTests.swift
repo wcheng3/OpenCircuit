@@ -68,4 +68,37 @@ final class SleepWindowTests: XCTestCase {
         XCTAssertEqual(SleepWindow.minutes(hour: 22, minute: 30), 1350)
         XCTAssertEqual(SleepWindow.minutes(hour: 0, minute: 0), 0)
     }
+
+    // MARK: isOvernightBlock — gate that keeps a worn daytime block from being staged as
+    // "last night" and overwriting the real night (adversarial review #1).
+
+    // A pre-midnight onset (23:00 → 07:00) is overnight.
+    func testOvernightPreMidnight() {
+        XCTAssertTrue(SleepWindow.isOvernightBlock(
+            start: date("2026-06-14T23:00:00Z"), end: date("2026-06-15T07:00:00Z"), calendar: utc))
+    }
+
+    // A post-midnight onset (01:00 → 08:00) is overnight (matches the PRIOR day's night anchor).
+    func testOvernightPostMidnight() {
+        XCTAssertTrue(SleepWindow.isOvernightBlock(
+            start: date("2026-06-15T01:00:00Z"), end: date("2026-06-15T08:00:00Z"), calendar: utc))
+    }
+
+    // An afternoon nap (13:00 → 15:00) is NOT overnight — the case the gate exists to reject.
+    func testAfternoonNapNotOvernight() {
+        XCTAssertFalse(SleepWindow.isOvernightBlock(
+            start: date("2026-06-15T13:00:00Z"), end: date("2026-06-15T15:00:00Z"), calendar: utc))
+    }
+
+    // A long sedentary daytime block (10:00 → 16:00, e.g. a meeting/movie marathon) is NOT overnight.
+    func testLongDaytimeBlockNotOvernight() {
+        XCTAssertFalse(SleepWindow.isOvernightBlock(
+            start: date("2026-06-15T10:00:00Z"), end: date("2026-06-15T16:00:00Z"), calendar: utc))
+    }
+
+    // An early-evening onset (19:30 → 04:00) is overnight (overlaps the same-day 18:00 anchor).
+    func testEarlyEveningOnsetOvernight() {
+        XCTAssertTrue(SleepWindow.isOvernightBlock(
+            start: date("2026-06-14T19:30:00Z"), end: date("2026-06-15T04:00:00Z"), calendar: utc))
+    }
 }

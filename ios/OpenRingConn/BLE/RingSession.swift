@@ -27,6 +27,12 @@ final class RingSession: NSObject {
 
     private(set) var liveHR: Int?
     private(set) var liveSpO2: Int?       // 🟡 from long 0x15 frame byte[14]
+    /// Wall-clock when `liveHR` / `liveSpO2` were last actually LOCKED (a fresh decoded reading) —
+    /// NOT when the last frame arrived. The idle keepalive bumps `lastFrameAt` to ≈now on every
+    /// descriptor frame, so stamping a persisted reading with `lastFrameAt` re-dated a lingering
+    /// (stale) HR/SpO₂ to ~now. Stamp with the true capture time instead (see `stopLiveMonitoring`).
+    private var liveHRAt: Date?
+    private var liveSpO2At: Date?
     /// Recent live-HR samples (oldest→newest, capped). Lets the UI show whether the
     /// reading is converging vs. stuck — these sensors report a windowed average that
     /// climbs over ~20–60 s of stillness, so a single number is misleading.
@@ -45,6 +51,10 @@ final class RingSession: NSObject {
     /// measured — not `Date()`, which would push a minutes-old reading into HealthKit "now".
     private(set) var lastFrameAt: Date?
     private(set) var monitoring = false
+    /// When the current live-monitoring cycle began (set in `startLiveMonitoring`). Lets the
+    /// stop-time persist keep ONLY readings actually measured during this cycle, so a value
+    /// lingering from an earlier cycle isn't re-persisted (and re-dated) at stop.
+    private var monitoringStartedAt: Date?
     /// True during the open→drain phase before the live stream starts. The ring won't
     /// emit live frames until its history backlog is fully drained, so we surface this
     /// so the UI shows "preparing" instead of a dead reading.
@@ -312,8 +322,9 @@ final class RingSession: NSObject {
         syncTask?.cancel(); syncTask = nil
         syncing = false
         monitoring = true
+        monitoringStartedAt = Date()
         livePreparing = true
-        if clearStaleValue { liveHR = nil }   // fresh user read — don't let a stale value look live (#45 C)
+        if clearStaleValue { liveHR = nil; liveHRAt = nil }   // fresh user read — don't let a stale value look live (#45 C)
         liveHRTrend.removeAll()   // fresh convergence window
         liveHRWarmup = nil
         bulkRecords.removeAll()   // any pages we drain below land here (don't lose them)
@@ -369,7 +380,7 @@ final class RingSession: NSObject {
                 self.historySamples = BulkSleep.samples(from: self.bulkRecords)
                 self.sleepSegments = BulkSleep.sleepSegments(from: self.bulkRecords,
                                                              temperatures: self.wearTemperatureSamples())   // wear gate (#41)
-                self.stagedSegments = BulkSleep.stagedSegments(from: self.bulkRecords)
+                self.stagedSegments = self.overnightStagedSegments(from: self.bulkRecords)   // overnight gate (review #1)
                 self.persist(self.historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
                 self.persistSleepAndSteps()          // sleep summary + steps for offline display
                 self.bulkFinalized = true            // committed — the stop-time safety net can skip it
@@ -666,6 +677,21 @@ final class RingSession: NSObject {
         storedMetricSamples += (try? localStore.ingest(samples).count) ?? 0
     }
 
+    /// Staged sleep segments for a sync, but ONLY when the detected block is OVERNIGHT sleep.
+    /// A normal daytime "Sync from ring" can drain worn, sedentary daytime epochs (a long meeting,
+    /// a movie, an afternoon nap > 1 h); `BulkSleep.stagedSegments` would classify the first still
+    /// block > 1 h as sleep, and since this feeds both the persistent Sleep card and the
+    /// `StoredSleepSummary` rollup (upserted by start-of-day), a daytime block could be shown as
+    /// "last night" and overwrite/supersede the real night — reintroducing the disappearing-sleep
+    /// bug through the sync door. Gating to an overnight window (by overlap, never clipping, so the
+    /// real night's totals are preserved) means a daytime block yields `[]`, and the card then
+    /// falls back to the stored real night. (Adversarial review #1.)
+    private func overnightStagedSegments(from records: [BulkRecord]) -> [SleepSegment] {
+        let segs = BulkSleep.stagedSegments(from: records)
+        guard let block = segs.first(where: { $0.stage == .inBed }) else { return segs }
+        return SleepWindow.isOvernightBlock(start: block.start, end: block.end) ? segs : []
+    }
+
     /// Persist the latest night's sleep summary + today's step count so the dashboard
     /// shows them OFFLINE after disconnect. Both UPSERT by day (no duplicates) and bypass
     /// the cumulative-counter `ingest` path entirely — the SyncCursor is untouched.
@@ -758,6 +784,7 @@ final class RingSession: NSObject {
     /// asking for a new reading wants.
     private func rearmUserMeasure() {
         liveHR = nil
+        liveHRAt = nil
         liveHRTrend.removeAll()
         liveHRWarmup = nil
         userMeasureFailed = false        // retry: dismiss the prior error naturally (#55)
@@ -815,19 +842,30 @@ final class RingSession: NSObject {
             historySamples = BulkSleep.samples(from: bulkRecords)
             sleepSegments = BulkSleep.sleepSegments(from: bulkRecords,
                                                     temperatures: wearTemperatureSamples())   // wear gate (#41)
-            stagedSegments = BulkSleep.stagedSegments(from: bulkRecords)
+            stagedSegments = overnightStagedSegments(from: bulkRecords)   // overnight gate (review #1)
             persist(historySamples)
             persistSleepAndSteps()
             bulkFinalized = true
         }
-        // Persist the last live reading so the dashboard shows it after disconnect. Stamp it with
-        // WHEN the ring last actually sent a frame, not `Date()` (#36): on a silently-dropped link
-        // the last value can be minutes old, and stamping "now" would push a wrong timestamp into
-        // HealthKit. Fall back to now only if we somehow never recorded a frame.
-        let stamp = lastFrameAt ?? Date()
+        // Persist the last live reading so the dashboard shows it after disconnect — stamped at
+        // WHEN THE VALUE WAS MEASURED (`liveHRAt`/`liveSpO2At`), not `lastFrameAt`. The idle
+        // keepalive bumps `lastFrameAt` to ≈now on every descriptor frame, so a lingering
+        // `liveHR`/`liveSpO2` (a prior lock — `liveSpO2` is never cleared) was re-stamped to ~now
+        // at every stop. That now-dated STALE value advanced the sync cursor past genuinely newer
+        // synced sleep epochs (which then deduped out of the store) AND out-ranked them in
+        // VitalsTableView.latestReading — so HR/SpO₂ showed the old measured value and never the
+        // newer synced one. Stamping at the true capture time, and only persisting a reading
+        // measured in THIS cycle (`>= monitoringStartedAt`), makes any re-persist land at its real
+        // (old) time: deduped harmlessly, never masking fresher sync data. (#36 still holds — a
+        // real lock's capture time is when it was measured, never a wrong "now".)
+        let cycleStart = monitoringStartedAt ?? .distantPast
         var last: [QuantitySample] = []
-        if let hr = liveHR { last.append(QuantitySample(kind: .heartRate, start: stamp, value: Double(hr))) }
-        if let spo2 = liveSpO2 { last.append(QuantitySample(kind: .spo2, start: stamp, value: Double(spo2) / 100)) }
+        if let hr = liveHR, let at = liveHRAt, at >= cycleStart {
+            last.append(QuantitySample(kind: .heartRate, start: at, value: Double(hr)))
+        }
+        if let spo2 = liveSpO2, let at = liveSpO2At, at >= cycleStart {
+            last.append(QuantitySample(kind: .spo2, start: at, value: Double(spo2) / 100))
+        }
         persist(last)
     }
 
@@ -881,7 +919,7 @@ final class RingSession: NSObject {
         historySamples = BulkSleep.samples(from: bulkRecords)
         sleepSegments = BulkSleep.sleepSegments(from: bulkRecords,
                                                 temperatures: wearTemperatureSamples())   // wear gate (#41)
-        stagedSegments = BulkSleep.stagedSegments(from: bulkRecords)
+        stagedSegments = overnightStagedSegments(from: bulkRecords)   // overnight gate (review #1)
         persist(historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
         persistSleepAndSteps()    // sleep summary + steps for offline display
         bulkFinalized = true      // committed — the stop-time safety net can skip these records
@@ -1143,6 +1181,7 @@ extension RingSession: CBPeripheralDelegate {
             if frame.opcode == Frame.responseID(Opcode.poll) {
                 if let hr = LiveHR.decodeLocked(bytes) {                         // short frame, locked on
                     self.liveHR = hr
+                    self.liveHRAt = Date()   // true capture time for the stop-time persist (not lastFrameAt)
                     self.liveHRWarmup = nil
                     self.liveHRTrend.append(hr)
                     if self.liveHRTrend.count > 12 { self.liveHRTrend.removeFirst() }
@@ -1155,6 +1194,7 @@ extension RingSession: CBPeripheralDelegate {
                 }
                 if let spo2 = LiveHR.decodeSpO2(bytes) {                         // long frame, 🟡
                     self.liveSpO2 = spo2
+                    self.liveSpO2At = Date()   // true capture time for the stop-time persist (not lastFrameAt)
                     ringLog.notice("live SpO2: \(spo2)%")
                 }
             }
