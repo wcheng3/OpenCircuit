@@ -24,6 +24,9 @@ struct ContentView: View {
     /// link is `ready`. A user "Scan & connect" never sets this, so the auto-refresh can't
     /// fire on top of a manual connect.
     @State private var pendingAutoSync = false
+    /// Tracks whether the ring was at 100 % (charged) in the current connection so the
+    /// charging-complete notification fires exactly once per charge cycle. (#86)
+    @State private var batteryWasFull = false
     /// Last time the foreground auto-refresh ran a sync; debounces repeated foregrounds.
     @State private var lastForegroundSync: Date?
     /// Minimum spacing between foreground auto-syncs — one bounded refresh per foreground,
@@ -51,6 +54,7 @@ struct ContentView: View {
                     if womensHealthEnabled { cycleCalendarCard }
                     trendsNavigationCard
                     syncCard
+                    deviceInfoCard
                     debugCard
                 }
                 .padding()
@@ -108,6 +112,18 @@ struct ContentView: View {
             }
             .onChange(of: session?.monitoring) { _, monitoring in
                 if monitoring == false { flushHealth() }
+            }
+            // Battery: TTE + charging-complete notification (#86).
+            .onChange(of: session?.batteryPercent) { _, pct in
+                guard let pct else { return }
+                let charging = session?.inferredCharging ?? false
+                if BatteryTTE.justReachedFull(percent: pct, inferredCharging: charging,
+                                              wasFull: batteryWasFull) {
+                    batteryWasFull = true
+                    let store = LocalStore(modelContext)
+                    Task { await HealthNotificationCenter().postChargingComplete(store: store) }
+                }
+                if pct < 100 { batteryWasFull = false }
             }
         }
     }
@@ -173,6 +189,26 @@ struct ContentView: View {
         let battery = session?.batteryPercent
         Task { await LocalAlertCenter().evaluate(batteryPercent: battery, healthAuthorized: authorized) }
         evaluateHealthAlerts()
+        evaluateReminders()
+    }
+
+    /// Evaluate the three app-side reminders (#84: sedentary / wear / bedtime) against the
+    /// current session and persisted UserDefaults state, routing survivors through the shared
+    /// notification engine (quiet hours + anti-spam backoff).
+    private func evaluateReminders() {
+        let d = UserDefaults.standard
+        SleepScheduleDefaults.register(d)
+        let bedMinutes  = d.integer(forKey: SleepScheduleDefaults.bedMinutes)
+        let wakeMinutes = d.integer(forKey: SleepScheduleDefaults.wakeMinutes)
+        let sleepEnabled = d.bool(forKey: SleepScheduleDefaults.enabled)
+        let s = session
+        Task {
+            await HealthNotificationCenter().evaluateReminders(
+                session: s,
+                sleepBedMinutes: bedMinutes,
+                sleepWakeMinutes: wakeMinutes,
+                sleepEnabled: sleepEnabled)
+        }
     }
 
     /// Evaluate the user's body-vital alert rules (#73 high-HR / low-SpO2 / elevated-HR-while-inactive
@@ -225,6 +261,14 @@ struct ContentView: View {
                                              : AnyShapeStyle(b <= 20 ? Color.red : Color.secondary))
                         if let asOf = batteryAsOf {
                             Text(asOf).font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        // TTE estimate (#86): only shown when discharging (not inferred charging)
+                        // and the window has enough data for a clean rate.
+                        if session?.inferredCharging != true,
+                           let samples = session?.batteryTTESamples,
+                           let tte = BatteryTTE.timeToEmpty(samples) {
+                            Text("~\(tteString(tte)) est.")
+                                .font(.caption2).foregroundStyle(.tertiary)
                         }
                     }
                 }
@@ -334,6 +378,15 @@ struct ContentView: View {
     private static let rel: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated; return f
     }()
+
+    /// Human-readable battery time-to-empty string (#86): "Xh Ym" or just "Xm" for < 1 h.
+    private func tteString(_ tte: TimeInterval) -> String {
+        let totalMin = Int(tte / 60)
+        let h = totalMin / 60
+        let m = totalMin % 60
+        if h > 0 { return m > 0 ? "\(h)h \(m)m" : "\(h)h" }
+        return "\(max(totalMin, 1))m"
+    }
 
     /// SF Symbol for the ring's battery level.
     private func batteryIcon(_ pct: Int) -> String {
@@ -534,6 +587,31 @@ struct ContentView: View {
                 Text(lastWrite).font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    // MARK: Device Info (#79)
+
+    /// Taps through to the read-only device information screen (FW version / generation /
+    /// manufacturer / MAC address). Sits between the sync card and the debug card.
+    private var deviceInfoCard: some View {
+        NavigationLink {
+            DeviceInfoView(session: session)
+        } label: {
+            card {
+                HStack(spacing: 8) {
+                    Image(systemName: "cpu").foregroundStyle(.teal)
+                    Text("DEVICE INFO")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    if let v = session?.firmwareInfo.version, !v.isEmpty {
+                        Text(v).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: Debug

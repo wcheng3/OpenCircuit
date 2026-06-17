@@ -38,6 +38,8 @@ struct VitalsTableView: View {
     @AppStorage(SleepScheduleDefaults.enabled) private var sleepEnabled = false
     @AppStorage(SleepScheduleDefaults.bedMinutes) private var bedMinutes = SleepScheduleDefaults.defaultBedMinutes
     @AppStorage(SleepScheduleDefaults.wakeMinutes) private var wakeMinutes = SleepScheduleDefaults.defaultWakeMinutes
+    /// Temperature display unit (#83). Syncs with the Units section in UserProfileSettingsView.
+    @AppStorage("units.temperature") private var tempUnitRaw = TemperatureUnit.localeDefault.rawValue
 
     /// Days of temperature history the night-temp window query scans before the precise night
     /// window is applied in memory — generous enough to cover the most recent night, still tiny
@@ -385,8 +387,10 @@ struct VitalsTableView: View {
         return Self.rel.localizedString(for: d.updatedAt, relativeTo: Date())
     }
 
+    /// Format a Celsius value in the user's chosen unit (#83).
     private func tempString(_ celsius: Double) -> String {
-        String(format: "%.1f °F", celsius * 9 / 5 + 32)
+        let unit = TemperatureUnit(rawValue: tempUnitRaw) ?? .celsius
+        return UnitsFormatter.temperature(celsius, unit: unit)
     }
 
     /// Latest stored value for `kind`, formatted, or "—" if none.

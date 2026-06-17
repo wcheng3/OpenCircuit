@@ -250,15 +250,32 @@ final class RingSession: NSObject {
     /// Device-Information System ID (0x2a23) — carries the ring's 6-byte MAC (§1). iOS hides the MAC
     /// from CoreBluetooth, but the per-connection auth (#54) needs it, so we read it from here.
     private let systemIDUUID = CBUUID(string: "2A23")
+    /// DIS Firmware Revision String (0x2A26) — human-readable FW version (e.g. "FR02.018"). (#79)
+    private let firmwareRevUUID = CBUUID(string: "2A26")
+    /// DIS Manufacturer Name String (0x2A29). (#79)
+    private let manufacturerUUID = CBUUID(string: "2A29")
+    /// DIS Hardware Revision String (0x2A27). (#79)
+    private let hardwareRevUUID = CBUUID(string: "2A27")
     /// The ring's 6-byte BLE MAC, recovered from the System ID characteristic. Drives the auth
     /// challenge-response (`RingAuth`); nil until read (then we fall back to the legacy fixed auth).
     private var ringMAC: [UInt8]?
+    /// DIS fields collected from the ring (firmware version, generation, manufacturer, etc.) (#79).
+    /// Populated incrementally as each DIS characteristic is read; `DeviceInfoView` observes this.
+    private(set) var firmwareInfo = FirmwareInfo()
+    /// Rolling battery % samples for the TTE estimate (#86). Capped at 20 entries (oldest→newest).
+    private var batteryHistory: [BatteryTTE.Sample] = []
+    private static let batteryHistoryCap = 20
+    /// Read accessor for the TTE sample window (#86).
+    var batteryTTESamples: [BatteryTTE.Sample] { batteryHistory }
 
     init(peripheral: CBPeripheral, localStore: LocalStore? = nil) {
         self.peripheral = peripheral
         self.localStore = localStore
         super.init()
         peripheral.delegate = self
+        // Seed the model name from the peripheral's advertised name; may be overridden later
+        // by a dedicated DIS Model Number characteristic if the ring exposes one. (#79)
+        firmwareInfo.modelName = peripheral.name ?? ""
         // Re-discovery guard (#42): on a restored / already-connected peripheral the data service
         // is usually already discovered, so re-scanning ALL services on every relaunch is wasted
         // work. If the data service is already present, go straight to (re-)matching its
@@ -1053,6 +1070,12 @@ extension RingSession: CBPeripheralDelegate {
                     self.writeChar = ch
                 } else if ch.uuid == self.systemIDUUID, self.ringMAC == nil {
                     peripheral.readValue(for: ch)   // → MAC for the auth challenge-response (#54)
+                } else if ch.uuid == self.firmwareRevUUID {
+                    peripheral.readValue(for: ch)   // → FW version string (#79)
+                } else if ch.uuid == self.manufacturerUUID {
+                    peripheral.readValue(for: ch)   // → Manufacturer Name (#79)
+                } else if ch.uuid == self.hardwareRevUUID {
+                    peripheral.readValue(for: ch)   // → Hardware Revision (#79)
                 }
             }
             self.ready = (self.notifyChar != nil && self.writeChar != nil)
@@ -1075,10 +1098,25 @@ extension RingSession: CBPeripheralDelegate {
             if characteristic.uuid == self.systemIDUUID {
                 if let mac = RingAuth.macFromSystemID(bytes) {
                     self.ringMAC = mac
-                    ringLog.notice("ring MAC (System ID): \(mac.map { String(format: "%02x", $0) }.joined(separator: ":"), privacy: .public) → auth V=0x\(String(format: "%02x", RingAuth.macTailXor(mac)), privacy: .public)")
+                    let macStr = mac.map { String(format: "%02x", $0) }.joined(separator: ":")
+                    ringLog.notice("ring MAC (System ID): \(macStr, privacy: .public) → auth V=0x\(String(format: "%02x", RingAuth.macTailXor(mac)), privacy: .public)")
+                    self.firmwareInfo.mac = macStr.uppercased()   // (#79) surfaced in DeviceInfoView
                 } else {
                     ringLog.notice("System ID unparsed (\(bytes.count, privacy: .public)B): \(bytes.map { String(format: "%02x", $0) }.joined(separator: " "), privacy: .public)")
                 }
+                return
+            }
+            // DIS string reads (firmware/manufacturer/hardware revision) — UTF-8 strings (#79).
+            if characteristic.uuid == self.firmwareRevUUID {
+                if let s = String(bytes: bytes, encoding: .utf8) { self.firmwareInfo.version = s }
+                return
+            }
+            if characteristic.uuid == self.manufacturerUUID {
+                if let s = String(bytes: bytes, encoding: .utf8) { self.firmwareInfo.manufacturer = s }
+                return
+            }
+            if characteristic.uuid == self.hardwareRevUUID {
+                if let s = String(bytes: bytes, encoding: .utf8) { self.firmwareInfo.hardwareRevision = s }
                 return
             }
             self.lastFrame = data.map { String(format: "%02x", $0) }.joined(separator: " ")
@@ -1123,6 +1161,9 @@ extension RingSession: CBPeripheralDelegate {
                 }
                 if update.deltaToAdd > 0 {
                     try? localStore?.addDailySteps(update.deltaToAdd, day: sampleDate)
+                    // Record activity time for the sedentary reminder (#84).
+                    UserDefaults.standard.set(sampleDate.timeIntervalSince1970,
+                                              forKey: ReminderDefaults.lastActivityAt)
                 }
                 // Re-read the sample day's total from the store as the live display value: a fresh
                 // row on midnight rollover reads its own total (no prior-day baseline bleed), and a
@@ -1175,7 +1216,8 @@ extension RingSession: CBPeripheralDelegate {
                 }
             }
             // Ring battery % is descriptor byte[1] (§5.4 🟢, ground-truthed).
-            // Also stamps `batteryFetchedAt` (#57) and extends the charging-inference trend (#60).
+            // Also stamps `batteryFetchedAt` (#57) and extends the charging-inference trend (#60)
+            // and the TTE sample window (#86).
             if let b = DeviceStatus.battery(bytes) {
                 self.batteryPercent = b
                 self.batteryFetchedAt = Date()   // dedicated freshness anchor (#57)
@@ -1185,6 +1227,11 @@ extension RingSession: CBPeripheralDelegate {
                     if self.batteryTrend.count > Self.batteryTrendCapacity {
                         self.batteryTrend.removeFirst()
                     }
+                }
+                // TTE: rolling window of timestamped battery % readings (#86).
+                self.batteryHistory.append(BatteryTTE.Sample(percent: b, at: Date()))
+                if self.batteryHistory.count > Self.batteryHistoryCap {
+                    self.batteryHistory.removeFirst()
                 }
             }
             // Bulk history pages: accumulate + ack to continue draining (47→c7, 4c→cc).

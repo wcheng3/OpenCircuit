@@ -16,8 +16,9 @@
 
 import Foundation
 
-/// Every user-facing health notification, across #73 (HR/SpO2) and #85 (temp/fever). One enum =
-/// one de-dupe namespace, so the same condition can't re-fire from two code paths.
+/// Every user-facing health notification, across #73 (HR/SpO2), #85 (temp/fever),
+/// #84 (reminders), and #86 (charging complete). One enum = one de-dupe namespace,
+/// so the same condition can't re-fire from two code paths.
 public enum HealthNotification: String, CaseIterable, Codable, Sendable {
     // #73 — heart rate & blood oxygen
     case highHR
@@ -29,6 +30,12 @@ public enum HealthNotification: String, CaseIterable, Codable, Sendable {
     case skinTempFluctuationRise // 0x10 skinTempFluctuationRise
     case skinTempFluctuationDrop // 0x11 skinTempFluctuationDrop
     case fever                   // 0x14 feverAbnormal (HR + temp cross-reference, #72)
+    // #84 — app-side reminders
+    case sedentaryReminder = "reminder.sedentary"
+    case wearReminder      = "reminder.wear"
+    case bedtimeReminder   = "reminder.bedtime"
+    // #86 — battery charging complete
+    case chargingComplete  = "battery.chargingComplete"
 }
 
 // MARK: - Quiet hours (shared DND window)

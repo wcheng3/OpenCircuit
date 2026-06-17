@@ -14,6 +14,33 @@ import UserNotifications
 // alerts the user opted into. They share the same app-wide notification authorization, but keep
 // their own settings, de-dupe lane, and copy (each carries the "not a medical device" disclaimer).
 
+// MARK: - Reminder settings (#84)
+
+/// `@AppStorage`/`UserDefaults` keys + defaults for the three app-side reminders (#84).
+/// Registered so `bool(forKey:)`/`integer(forKey:)` return the intended value on first run,
+/// mirroring the pattern in `HealthAlertDefaults`.
+enum ReminderDefaults {
+    static let sedentaryEnabled    = "reminder.sedentary.enabled"
+    static let sedentaryIntervalMin = "reminder.sedentary.intervalMin"
+    static let wearEnabled          = "reminder.wear.enabled"
+    static let bedtimeEnabled       = "reminder.bedtime.enabled"
+    static let bedtimeMinutesBefore = "reminder.bedtime.minutesBefore"
+
+    /// UserDefaults key written by RingSession when a nonzero step delta arrives.
+    /// Read by `evaluateReminders` to decide whether the user has been sedentary.
+    static let lastActivityAt = "reminder.lastActivityAt"
+
+    static func register(_ d: UserDefaults = .standard) {
+        d.register(defaults: [
+            sedentaryEnabled:    true,
+            sedentaryIntervalMin: 50,
+            wearEnabled:         false,
+            bedtimeEnabled:      false,
+            bedtimeMinutesBefore: 30,
+        ])
+    }
+}
+
 // MARK: - Settings (shared by the engine and the settings UI)
 
 /// `@AppStorage`/`UserDefaults` keys + defaults for the health-alert thresholds and quiet hours.
@@ -199,6 +226,74 @@ struct HealthNotificationCenter {
                                              skinTempOffsetC: tempOffsetC)
     }
 
+    // MARK: - Reminders (#84)
+
+    /// Evaluate all three app-side reminders (sedentary / wear / bedtime) and fire any
+    /// survivors through the ONE shared gate (quiet hours + anti-spam backoff). Safe to
+    /// call liberally — a no-op when nothing crosses a threshold or everything is held by
+    /// the gate. Pass `sleepEnabled = true` and the configured bed/wake minutes to enable
+    /// the bedtime reminder; pass `sleepEnabled = false` to skip it.
+    func evaluateReminders(session: RingSession?,
+                           sleepBedMinutes: Int, sleepWakeMinutes: Int, sleepEnabled: Bool,
+                           now: Date = Date()) async {
+        ReminderDefaults.register()
+        let d = UserDefaults.standard
+        var candidates: [HealthNotification] = []
+
+        // Sedentary / move reminder
+        if d.bool(forKey: ReminderDefaults.sedentaryEnabled) {
+            let interval = TimeInterval(d.integer(forKey: ReminderDefaults.sedentaryIntervalMin)) * 60
+            let r = SedentaryReminder(interval: max(interval, 10 * 60))
+            let lastActivityEpoch = d.double(forKey: ReminderDefaults.lastActivityAt)
+            let lastActivityAt: Date? = lastActivityEpoch > 0
+                ? Date(timeIntervalSince1970: lastActivityEpoch) : nil
+            if r.shouldFire(lastActivityAt: lastActivityAt, now: now) {
+                candidates.append(.sedentaryReminder)
+            }
+        }
+
+        // Wear reminder
+        if d.bool(forKey: ReminderDefaults.wearEnabled) {
+            let r = WearReminder()
+            // "ever connected" = a peripheral ID has been persisted by RingScanner.
+            let hasSavedRing = d.string(forKey: "com.openringconn.ring.peripheralID") != nil
+            let lastData = session?.lastFrameAt
+            if r.shouldFire(lastRingDataAt: lastData, now: now, everConnected: hasSavedRing) {
+                candidates.append(.wearReminder)
+            }
+        }
+
+        // Bedtime reminder
+        if sleepEnabled, d.bool(forKey: ReminderDefaults.bedtimeEnabled) {
+            let minutesBefore = d.integer(forKey: ReminderDefaults.bedtimeMinutesBefore)
+            let r = BedtimeReminder(minutesBefore: max(minutesBefore, 5))
+            if r.shouldFire(now: now, bedMinutes: sleepBedMinutes, wakeMinutes: sleepWakeMinutes) {
+                candidates.append(.bedtimeReminder)
+            }
+        }
+
+        guard !candidates.isEmpty else { return }
+        let quiet = HealthAlertDefaults.quietHours()
+        let fire = gate.filter(candidates, now: now, lastFired: store.lastFired(), quietHours: quiet)
+        guard !fire.isEmpty, await ensureAuthorized() else { return }
+        for n in fire { await post(n, hit: nil) }
+        store.markFired(fire, at: now)
+    }
+
+    // MARK: - Charging complete (#86)
+
+    /// Post a "ring fully charged" notification, routed through the shared gate so it
+    /// respects quiet hours and the anti-spam backoff. Called by ContentView when
+    /// `BatteryTTE.justReachedFull` fires. (#86)
+    func postChargingComplete(store localStore: LocalStore) async {
+        let candidates: [HealthNotification] = [.chargingComplete]
+        let quiet = HealthAlertDefaults.quietHours()
+        let fire = gate.filter(candidates, now: Date(), lastFired: store.lastFired(), quietHours: quiet)
+        guard !fire.isEmpty, await ensureAuthorized() else { return }
+        for n in fire { await post(n, hit: nil) }
+        store.markFired(fire)
+    }
+
     /// Request notification authorization LAZILY — only the first time there's actually something
     /// to post, so a user who never crosses a threshold is never prompted. These are alerts the
     /// user opted into in Settings, so we request a standard (visible) authorization.
@@ -277,6 +372,20 @@ struct HealthNotificationCenter {
             return ("Possible fever signs",
                     "Your skin temperature and heart rate are both elevated above your baseline, "
                     + "which can accompany suspected fever symptoms (estimate).")
+        // #84 reminders — no medical disclaimer appended (they're lifestyle reminders)
+        case .sedentaryReminder:
+            return ("Move reminder",
+                    "You've been inactive for a while — time to move! (estimated)")
+        case .wearReminder:
+            return ("Ring not detected",
+                    "Put your ring back on to continue tracking.")
+        case .bedtimeReminder:
+            return ("Bedtime reminder",
+                    "Time to wind down for bed.")
+        // #86 battery
+        case .chargingComplete:
+            return ("Ring fully charged",
+                    "Your RingConn ring has reached 100% — disconnect the charger (estimated).")
         }
     }
 }

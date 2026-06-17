@@ -21,6 +21,8 @@ import OpenRingKit
 /// hypnogram (PROTOCOL.md §5.3) — so the card labels them "est.".
 struct SleepCardView: View {
     @Environment(\.modelContext) private var modelContext
+    /// Temperature display unit (#83). Syncs with the Units section in UserProfileSettingsView.
+    @AppStorage("units.temperature") private var tempUnitRaw = TemperatureUnit.localeDefault.rawValue
     /// Trailing persisted nights (latest first) — the offline source of truth. The window is
     /// wider than 1 so the rolling skin-temp baseline + the offset mini-chart (#69) have history;
     /// `latest` (= `storedSleep.first`) still drives the headline night.
@@ -262,7 +264,7 @@ struct SleepCardView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "thermometer.medium").font(.caption2).foregroundStyle(.pink)
                     Text("Skin temp").font(.caption2).foregroundStyle(.secondary)
-                    Text(String(format: "%.1f°C", r.nightlyC))
+                    Text(skinTempString(r.nightlyC))
                         .font(.caption.weight(.semibold)).monospacedDigit()
                     if let off = r.offsetC {
                         Text(String(format: "%+.1f°C vs baseline", off))
@@ -275,6 +277,12 @@ struct SleepCardView: View {
             }
             .padding(.top, 2)
         }
+    }
+
+    /// Format a Celsius skin-temp value in the user's chosen unit (#83).
+    private func skinTempString(_ celsius: Double) -> String {
+        let unit = TemperatureUnit(rawValue: tempUnitRaw) ?? .celsius
+        return UnitsFormatter.temperature(celsius, unit: unit)
     }
 
     private func tempColor(_ band: SkinTempBaseline.DeviationBand?) -> Color {

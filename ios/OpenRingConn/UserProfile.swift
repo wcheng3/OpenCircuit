@@ -33,6 +33,17 @@ struct UserProfileSettingsView: View {
     // never see the cycle calendar card on the dashboard. Shared key with ContentView.
     @AppStorage("userProfile.womensHealthEnabled") private var womensHealthEnabled = false
 
+    // Unit preferences (#83). Default to locale-appropriate units out of the box.
+    @AppStorage("units.temperature") private var tempUnitRaw = TemperatureUnit.localeDefault.rawValue
+    @AppStorage("units.distance")    private var distUnitRaw = DistanceUnit.localeDefault.rawValue
+
+    // App-side reminder settings (#84). Keys/defaults shared with ReminderDefaults.
+    @AppStorage(ReminderDefaults.sedentaryEnabled)     private var sedentaryEnabled    = true
+    @AppStorage(ReminderDefaults.sedentaryIntervalMin) private var sedentaryIntervalMin = 50
+    @AppStorage(ReminderDefaults.wearEnabled)          private var wearEnabled          = false
+    @AppStorage(ReminderDefaults.bedtimeEnabled)       private var bedtimeEnabled       = false
+    @AppStorage(ReminderDefaults.bedtimeMinutesBefore) private var bedtimeMinutesBefore = 30
+
     // Health-alert thresholds (#73) + skin-temp/fever toggle (#85) + the shared quiet-hours (DND)
     // window. Keys/defaults shared with the notification engine via `HealthAlertDefaults`.
     @AppStorage(HealthAlertDefaults.highHREnabled) private var highHREnabled = true
@@ -173,6 +184,52 @@ struct UserProfileSettingsView: View {
                 }
                 Text("Health alerts are held during this window (delivered once it ends if still "
                      + "relevant).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            // MARK: Reminders (#84)
+            Section("Reminders") {
+                Toggle("Sedentary / move reminder", isOn: $sedentaryEnabled)
+                if sedentaryEnabled {
+                    Stepper(value: $sedentaryIntervalMin, in: 30...120, step: 10) {
+                        LabeledContent("Remind after", value: "\(sedentaryIntervalMin) min inactive")
+                    }
+                }
+                Toggle("Wear reminder", isOn: $wearEnabled)
+                Toggle("Bedtime reminder", isOn: $bedtimeEnabled)
+                if bedtimeEnabled {
+                    Stepper(value: $bedtimeMinutesBefore, in: 15...60, step: 15) {
+                        LabeledContent("Warn before bed", value: "\(bedtimeMinutesBefore) min")
+                    }
+                }
+                Text("Reminder quiet hours and backoff use the same settings as health alerts above.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            // MARK: Units (#83)
+            Section("Units") {
+                Picker("Temperature", selection: $tempUnitRaw) {
+                    Text("°C").tag(TemperatureUnit.celsius.rawValue)
+                    Text("°F").tag(TemperatureUnit.fahrenheit.rawValue)
+                }
+                Picker("Distance", selection: $distUnitRaw) {
+                    Text("km").tag(DistanceUnit.metric.rawValue)
+                    Text("mi").tag(DistanceUnit.imperial.rawValue)
+                }
+                Text("Affects how temperature and distance values are shown throughout the app. "
+                     + "Values are always stored in metric internally.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            // MARK: Data export (#80)
+            Section("Data export") {
+                NavigationLink {
+                    ExportView()
+                } label: {
+                    Label("Export health data", systemImage: "square.and.arrow.up")
+                }
+                Text("Export all stored ring data (HR, SpO₂, sleep, steps) as CSV or JSON "
+                     + "for your own analysis. Data stays on your device unless you share it.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
