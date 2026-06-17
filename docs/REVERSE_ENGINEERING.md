@@ -40,6 +40,13 @@ and encrypted-vs-plaintext determination.
 
 ## Track B — Active probing (workbench)
 
+> ⚠️ **The Mac can only handshake, not pull data** (🟢 live test, PROTOCOL.md §0).
+> The ring gates `0x02`/`0x07`/`0x95` data commands behind an LE **bond**. An unbonded
+> CoreBluetooth/bleak central gets `0x01`→`0x81` replies but the ring silently drops
+> every data command, and bleak can't pair on macOS (`pair()` → NotImplementedError).
+> So `scan`/`enumerate`/`listen` work for the handshake, but `replay` of a sync/fetch
+> sees nothing. **For any real data, capture the bonded phone (Track A).**
+
 Once you can see the app's traffic, reproduce it yourself:
 
 ```
@@ -66,6 +73,32 @@ response → record in `PROTOCOL.md`.
   app↔cloud; the BLE link may still be plaintext. Confirm, don't assume.
 - **One variable at a time.** Take two HR readings 10 bpm apart and diff the
   payloads to locate the HR byte.
+
+## Track C — App-logic RE (Flutter / Dart AOT) — how the auth was cracked
+
+When the protocol isn't decodable from the wire alone (e.g. a keyed auth), reverse the official
+app's logic. The RingConn app is **Flutter**, so its logic lives in `lib/arm64-v8a/libapp.so`
+(Dart AOT snapshot) — **not** Java; jadx/apktool are useless. This is how the per-connection auth
+(`SM3([mac[3]^mac[4]^mac[5], challenge])[-3:]`, PROTOCOL §5.8 / issue #54) was recovered:
+
+1. **Pull the APK splits:** `adb shell pm path com.gdjztech.ringconn` → `adb pull` the base +
+   `split_config.arm64_v8a.apk` (the Dart code is in the **arm64 split**), or grab an XAPK/bundle.
+2. **Decompile the Dart AOT with blutter** (`github.com/worawit/blutter`; needs `brew install cmake
+   ninja capstone pkg-config` + a JDK). It auto-detects the Dart version, builds the matching VM,
+   and emits `asm/*.dart` (annotated ARM64), `pp.txt` (object pool), `objs.txt`, a Frida script.
+   ⚠️ **blutter can't parse a too-new Dart** — it SIGSEGV/SIGBUS'd on the current app's Dart 3.10.7.
+   **Workaround that worked:** RE an **older app version** (v3.2.1 = Dart 3.5.4) from APKMirror/
+   APKPure — wire protocols/algorithms are stable across app versions. Check first:
+   `strings libflutter.so | grep 'stable'`.
+3. **blutter sometimes omits a layer** (it dropped the BLE opcode-dispatch here). Fall back to
+   **capstone**: disassemble `libapp.so`, find the opcode-dispatch `cmp #0x81` cluster + the handler
+   it calls, read the arithmetic. (The Dart class names like `BleAuthRspMixin` survive as strings.)
+4. **VERIFY — never guess** (no-fabrication rule): reproduce the algorithm against ground-truth
+   (challenge,response) pairs harvested from btsnoop + a known-answer test for any standard primitive
+   (e.g. `SM3("abc")`). Don't claim a crack until **every** captured pair matches. Cheap pre-checks
+   first: `desktop/find_table.py` (lookup-table by spacing), `crack_f.py` (keyless/keyed hash/CRC
+   brute), `scan_smp.py` (SMP/bonding — confirm there's **no cloud key**, just a local ECDH LTK).
+5. **iOS gotcha:** CoreBluetooth hides the BLE MAC — read it from the DIS **System ID** char `0x2a23`.
 
 ## Safety
 

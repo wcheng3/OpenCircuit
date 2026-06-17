@@ -75,11 +75,41 @@ final class AnalyticsTests: XCTestCase {
         XCTAssertEqual(Strain(maxHR: 190, restingHR: 60).calculate(bpms: Array(repeating: 190, count: 86400)), 21.0)
     }
 
+    // MARK: Calories — Mifflin-St Jeor + TRIMP
+
+    func testMaleBMRMifflinStJeor() {
+        let profile = UserProfile(age: 30, weightKg: 80, heightCm: 180, sex: .male)
+        XCTAssertEqual(Calories.bmrKcalPerDay(profile: profile), 1780.0, accuracy: 0.001)
+        XCTAssertEqual(Calories.bmrKcalPerHour(profile: profile), 74.166_666, accuracy: 0.001)
+    }
+
+    func testFemaleBMRMifflinStJeor() {
+        let profile = UserProfile(age: 40, weightKg: 65, heightCm: 165, sex: .female)
+        XCTAssertEqual(Calories.bmrKcalPerDay(profile: profile), 1320.25, accuracy: 0.001)
+    }
+
+    func testActiveCaloriesFromEdwardsTRIMP() {
+        let start = Date(timeIntervalSince1970: 0)
+        let samples = (0..<600).map { offset in
+            HRSample(
+                bpm: 150,
+                start: start.addingTimeInterval(Double(offset)),
+                end: start.addingTimeInterval(Double(offset + 1))
+            )
+        }
+        // maxHR 180, restingHR 60, bpm 150 => 75% HRR => zone weight 3.
+        // 600 one-second samples = 10 min, TRIMP = 30, kcal = 150.
+        XCTAssertEqual(Calories.activeKcal(hrSamples: samples, maxHR: 180), 150.0, accuracy: 0.001)
+    }
+
     // MARK: Sleep score (sleep.rs)
 
     func testSleepScore() {
+        // #28: graded (floating-point ratio), not a 0-or-100 step function.
         XCTAssertEqual(SleepScore.score(durationSeconds: 8 * 3600), 100.0)
-        XCTAssertEqual(SleepScore.score(durationSeconds: 4 * 3600), 0.0)  // integer ratio
-        XCTAssertEqual(SleepScore.score(durationSeconds: 24 * 3600), 100.0)  // clamped
+        XCTAssertEqual(SleepScore.score(durationSeconds: 6 * 3600), 75.0)
+        XCTAssertEqual(SleepScore.score(durationSeconds: 4 * 3600), 50.0)
+        XCTAssertEqual(SleepScore.score(durationSeconds: 0), 0.0)
+        XCTAssertEqual(SleepScore.score(durationSeconds: 24 * 3600), 100.0)  // clamped at the ideal
     }
 }
