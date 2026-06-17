@@ -115,8 +115,34 @@ struct RollupBackup: Codable {
         var updatedAt: Date
         var healthWrittenSteps: Int
     }
+    /// User-ENTERED period logs (#78). Unlike sleep/steps these are NOT re-syncable from the
+    /// ring or recoverable from Apple Health (HK menstrualFlow isn't read back), so they're the
+    /// most irreplaceable rows and MUST survive a wipe. `healthWritten` + `hkSampleUUIDs` round-
+    /// trip so a restored entry isn't re-written to HealthKit and stays editable/deletable there.
+    struct Period: Codable {
+        var start: Date
+        var end: Date?
+        var flowLevelRaw: Int
+        var symptoms: [String]
+        var notes: String
+        var healthWritten: Bool
+        var hkSampleUUIDs: [String]
+        var updatedAt: Date
+    }
+    /// Auto-detected naps (#76). Re-derivable from synced sleep, but cheap to preserve and the
+    /// `healthWritten` flag round-trips so a restored nap isn't re-mirrored to Health.
+    struct Nap: Codable {
+        var start: Date
+        var end: Date
+        var asleepMin: Int
+        var isLongNap: Bool
+        var healthWritten: Bool
+        var updatedAt: Date
+    }
     var sleep: [Sleep]
     var daily: [Daily]
+    var periods: [Period]
+    var naps: [Nap]
 
     private static var backupURL: URL? {
         guard let dir = try? FileManager.default.url(
@@ -130,12 +156,15 @@ struct RollupBackup: Codable {
     /// them — and write a JSON snapshot. Returns the snapshot (nil if even this best-effort read
     /// fails). The file persists so a crash mid-wipe can't lose the rollups.
     static func exportBeforeWipe(config: ModelConfiguration) -> RollupBackup? {
-        let schema = Schema([StoredSleepSummary.self, StoredDaily.self])
+        let schema = Schema([StoredSleepSummary.self, StoredDaily.self,
+                             StoredPeriodEntry.self, StoredNap.self])
         let limited = ModelConfiguration(schema: schema, url: config.url)
         guard let container = try? ModelContainer(for: schema, configurations: limited) else { return nil }
         let ctx = ModelContext(container)
         let sleepRows = (try? ctx.fetch(FetchDescriptor<StoredSleepSummary>())) ?? []
         let dailyRows = (try? ctx.fetch(FetchDescriptor<StoredDaily>())) ?? []
+        let periodRows = (try? ctx.fetch(FetchDescriptor<StoredPeriodEntry>())) ?? []
+        let napRows = (try? ctx.fetch(FetchDescriptor<StoredNap>())) ?? []
         let backup = RollupBackup(
             sleep: sleepRows.map {
                 Sleep(night: $0.night, asleepMin: $0.asleepMin, deepMin: $0.deepMin,
@@ -146,6 +175,15 @@ struct RollupBackup: Codable {
             daily: dailyRows.map {
                 Daily(day: $0.day, steps: $0.steps, updatedAt: $0.updatedAt,
                       healthWrittenSteps: $0.healthWrittenSteps)
+            },
+            periods: periodRows.map {
+                Period(start: $0.start, end: $0.end, flowLevelRaw: $0.flowLevelRaw,
+                       symptoms: $0.symptoms, notes: $0.notes, healthWritten: $0.healthWritten,
+                       hkSampleUUIDs: $0.hkSampleUUIDs, updatedAt: $0.updatedAt)
+            },
+            naps: napRows.map {
+                Nap(start: $0.start, end: $0.end, asleepMin: $0.asleepMin,
+                    isLongNap: $0.isLongNap, healthWritten: $0.healthWritten, updatedAt: $0.updatedAt)
             })
         if let url = backupURL, let data = try? JSONEncoder().encode(backup) {
             try? data.write(to: url, options: .atomic)
@@ -167,6 +205,17 @@ struct RollupBackup: Codable {
         for d in daily {
             ctx.insert(StoredDaily(day: d.day, steps: d.steps, updatedAt: d.updatedAt,
                                    healthWrittenSteps: d.healthWrittenSteps))
+        }
+        for p in periods {
+            ctx.insert(StoredPeriodEntry(
+                start: p.start, end: p.end, flowLevelRaw: p.flowLevelRaw,
+                symptoms: p.symptoms, notes: p.notes, healthWritten: p.healthWritten,
+                hkSampleUUIDs: p.hkSampleUUIDs, updatedAt: p.updatedAt))
+        }
+        for n in naps {
+            ctx.insert(StoredNap(start: n.start, end: n.end, asleepMin: n.asleepMin,
+                                 isLongNap: n.isLongNap, healthWritten: n.healthWritten,
+                                 updatedAt: n.updatedAt))
         }
         if (try? ctx.save()) != nil, let url = Self.backupURL {
             try? FileManager.default.removeItem(at: url)

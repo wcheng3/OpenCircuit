@@ -74,6 +74,9 @@ final class HealthKitWriter {
         // Workout types (#75): HKWorkout + GPS route (workout sessions feature).
         set.insert(HKWorkoutType.workoutType())
         set.insert(HKSeriesType.workoutRoute())
+        // Cycling distance is written for cycling workouts (foot-based sports use the
+        // .distanceWalkingRunning type already covered by MetricKind.distance above).
+        set.insert(HKQuantityType(.distanceCycling))
         // Women's health (#78): user-logged period flow written to Health.
         // NOTE: temperature is NOT added here — it already ships via the canonical
         // `.basalBodyTemperature` path (MetricKind.temperature). No triple-write.
@@ -146,20 +149,26 @@ final class HealthKitWriter {
         // HealthKit SUMS stepCount / distanceWalkingRunning, so writing the delta lands the
         // day's running total without re-adding on every sync. Distance is an ESTIMATE
         // (steps × height-based stride — not GPS) and is labeled as such in HealthKit metadata.
+        // To avoid double counting against a recorded foot-based workout's GPS distance (which
+        // also writes .distanceWalkingRunning), the estimate is netted by any uncredited workout
+        // GPS distance for today — preferring the accurate GPS measurement (#).
         if let delta = try? store.pendingStepDelta(), delta > 0 {
-            let startOfDay = Calendar.current.startOfDay(for: Date())
-            let distanceM = DistanceEstimate.meters(steps: delta, profile: profile)
+            let now = Date()
+            let startOfDay = Calendar.current.startOfDay(for: now)
+            let rawDistanceM = DistanceEstimate.meters(steps: delta, profile: profile)
+            let (netDistanceM, gpsReduction) = Self.netDistanceEstimate(rawDistanceM, day: startOfDay)
             var toWrite: [QuantitySample] = [
-                QuantitySample(kind: .steps, start: startOfDay, end: Date(), value: Double(delta))
+                QuantitySample(kind: .steps, start: startOfDay, end: now, value: Double(delta))
             ]
-            if distanceM > 0 {
-                toWrite.append(QuantitySample(kind: .distance, start: startOfDay, end: Date(), value: distanceM))
+            if netDistanceM > 0 {
+                toWrite.append(QuantitySample(kind: .distance, start: startOfDay, end: now, value: netDistanceM))
             }
             do {
                 try await write(toWrite)
                 try store.advanceStepsWritten(by: delta)
+                Self.commitDistanceGPSCredit(gpsReduction, day: startOfDay)
                 result.steps = delta
-                result.distanceM = distanceM
+                result.distanceM = netDistanceM
             } catch { /* leave the watermark; retry next flush */ }
         }
         // Derived daily resting HR — one sample per finalized day (#18, #37). Idempotency is a
@@ -199,50 +208,80 @@ final class HealthKitWriter {
         return written
     }
 
-    /// Write pending user-logged period flow entries to Apple Health as
-    /// `menstrualFlow` category samples, returning the count written.
-    /// Each entry is gated by its own `healthWritten` flag — independent of
-    /// all other HK writes. One HKCategorySample per period entry spanning
-    /// start…end (or start + 5 days when no end is logged yet).
-    /// `HKMetadataKeyMenstrualCycleStart: true` marks each as the first day
-    /// of a new cycle (period start = cycle start). (#78)
+    /// Write pending user-logged period flow entries to Apple Health, returning the count
+    /// written. Apple Health Cycle Tracking models flow as one sample PER DAY, so each logged
+    /// day from start through the logged end (capped at today) is mirrored as its own one-day
+    /// `menstrualFlow` sample. We NEVER invent a duration: an OPEN period (no logged end) only
+    /// mirrors days up to today and stays pending, so subsequent days are added as they are
+    /// actually logged/elapse. Before re-writing (after an edit, or extending an open period)
+    /// the previously-written sample(s) are deleted by UUID so the append-only HealthKit store
+    /// doesn't accumulate duplicates. (#78)
     private func flushMenstrualFlow(localStore: LocalStore) async -> Int {
         guard let pending = try? localStore.pendingPeriodEntries(), !pending.isEmpty else { return 0 }
         var written = 0
         for entry in pending {
+            // Remove any prior samples for this entry first (edit / open-period extension).
+            if !entry.hkSampleUUIDs.isEmpty {
+                await deleteMenstrualFlowSamples(uuidStrings: entry.hkSampleUUIDs)
+            }
+            let finalized = entry.end != nil
             do {
-                try await writeMenstrualFlow(entry: entry)
-                try localStore.markPeriodEntryWritten(start: entry.start)
-                written += 1
+                let uuids = try await writeMenstrualFlow(entry: entry)
+                try localStore.recordPeriodEntryHK(start: entry.start,
+                                                   hkSampleUUIDs: uuids, finalized: finalized)
+                if !uuids.isEmpty { written += 1 }
             } catch { break }   // stop on first failure; unwritten entries retry next flush
         }
         return written
     }
 
-    /// Write a single `menstrualFlow` category sample for a period entry.
-    private func writeMenstrualFlow(entry: StoredPeriodEntry) async throws {
+    /// Write one single-day `menstrualFlow` category sample per logged day of a period (start
+    /// through the logged end, capped at today — future days are never asserted). Returns the
+    /// UUID strings of the samples saved so the caller can persist them for later delete/replace.
+    /// `HKMetadataKeyMenstrualCycleStart: true` is set on the FIRST day only (period start =
+    /// cycle start). Never fabricates a duration the user didn't log (P1 fix).
+    private func writeMenstrualFlow(entry: StoredPeriodEntry) async throws -> [String] {
         let type = HKCategoryType(.menstrualFlow)
-        // Map app flow level to HKCategoryValueMenstrualFlow.
         let flowValue: HKCategoryValueMenstrualFlow
         switch entry.flowLevelRaw {
         case 1: flowValue = .light
         case 3: flowValue = .heavy
         default: flowValue = .medium
         }
-        // Use logged end date, or start + 5 days as a sensible stand-in when the
-        // user hasn't closed the period yet. HK only stores what the user logged.
-        let endDate = entry.end ?? entry.start.addingTimeInterval(5 * 86_400)
-        let sample = HKCategorySample(
-            type: type,
-            value: flowValue.rawValue,
-            start: entry.start,
-            end: endDate,
-            metadata: [
-                // Mark the first day of the period as the first day of the cycle.
-                HKMetadataKeyMenstrualCycleStart: true,
-            ]
-        )
-        try await store.save(sample)
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let firstDay = cal.startOfDay(for: entry.start)
+        // Finalized period: through the logged end day. Open period: only up to today.
+        // Either way, never write a day in the future.
+        let endCandidate = entry.end.map { cal.startOfDay(for: $0) } ?? today
+        let lastDay = min(endCandidate, today)
+        guard lastDay >= firstDay else { return [] }
+
+        var samples: [HKCategorySample] = []
+        var day = firstDay
+        var isFirstDay = true
+        while day <= lastDay {
+            let dayEnd = cal.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
+            // Mark only the first day of the period as the first day of the cycle.
+            let metadata: [String: Any]? = isFirstDay ? [HKMetadataKeyMenstrualCycleStart: true] : nil
+            samples.append(HKCategorySample(type: type, value: flowValue.rawValue,
+                                            start: day, end: dayEnd, metadata: metadata))
+            isFirstDay = false
+            day = dayEnd
+        }
+        guard !samples.isEmpty else { return [] }
+        try await store.save(samples)
+        return samples.map { $0.uuid.uuidString }
+    }
+
+    /// Delete previously-written `menstrualFlow` samples by UUID (best-effort). Used when a
+    /// logged period is edited (delete-then-rewrite) or deleted in-app, so Apple Health never
+    /// keeps a stale or orphaned flow sample. (#78)
+    func deleteMenstrualFlowSamples(uuidStrings: [String]) async {
+        let uuids = Set(uuidStrings.compactMap { UUID(uuidString: $0) })
+        guard !uuids.isEmpty, Self.isAvailable else { return }
+        let predicate = HKQuery.predicateForObjects(with: uuids)
+        _ = try? await store.deleteObjects(of: HKCategoryType(.menstrualFlow), predicate: predicate)
     }
 
     func requestAuthorization() async throws {
@@ -355,6 +394,63 @@ final class HealthKitWriter {
     private static let exerciseWrittenKey = "hk.exerciseTime.writtenMin"  // total minutes already pushed
     // Metadata key for estimated exercise time samples
     static let exerciseEstimateMetadataKey = "OpenRingConnExerciseTimeEstimated"
+
+    // Distance double-count avoidance (steps×stride estimate vs workout GPS).
+    // WorkoutSessionManager records foot-based (walk/run/hike) GPS distance written to
+    // .distanceWalkingRunning today via `recordWorkoutWalkRunDistance`; the daily steps×stride
+    // estimate nets out this GPS distance so the same foot-distance isn't summed twice in
+    // Health's "Walking + Running Distance" total. Cycling GPS goes to .distanceCycling, which
+    // doesn't overlap the walk/run estimate, so it's never netted. GPS is preferred (the
+    // accurate measurement is kept; only the estimate is reduced for the overlapping window).
+    static let workoutWalkRunDistanceDayKey    = "hk.workoutWalkRunDistance.day"
+    static let workoutWalkRunDistanceMetersKey = "hk.workoutWalkRunDistance.meters"
+    private static let estimateGPSCreditedDayKey    = "hk.distanceEstimate.gpsCreditedDay"
+    private static let estimateGPSCreditedMetersKey = "hk.distanceEstimate.gpsCreditedMeters"
+
+    /// Record foot-based workout GPS distance (meters) written to .distanceWalkingRunning today,
+    /// so the daily steps×stride estimate can net it out and avoid double counting. Day-keyed.
+    static func recordWorkoutWalkRunDistance(_ meters: Double, now: Date = Date(),
+                                             _ defaults: UserDefaults = .standard) {
+        guard meters > 0 else { return }
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        let storedDay = Date(timeIntervalSince1970: defaults.double(forKey: workoutWalkRunDistanceDayKey))
+        var total = cal.startOfDay(for: storedDay) == today
+            ? defaults.double(forKey: workoutWalkRunDistanceMetersKey) : 0
+        total += meters
+        defaults.set(today.timeIntervalSince1970, forKey: workoutWalkRunDistanceDayKey)
+        defaults.set(total, forKey: workoutWalkRunDistanceMetersKey)
+    }
+
+    /// Reduce a raw steps×stride distance estimate by however much workout GPS walk/run distance
+    /// hasn't yet been netted out today, preferring the accurate GPS measurement. Returns the
+    /// net meters to write (≥ 0) and the reduction applied (to commit after a successful write).
+    private static func netDistanceEstimate(_ raw: Double, day today: Date,
+                                            _ defaults: UserDefaults = .standard) -> (net: Double, reduction: Double) {
+        let cal = Calendar.current
+        let gpsDay = Date(timeIntervalSince1970: defaults.double(forKey: workoutWalkRunDistanceDayKey))
+        let gpsTotal = cal.startOfDay(for: gpsDay) == today
+            ? defaults.double(forKey: workoutWalkRunDistanceMetersKey) : 0
+        let creditedDay = Date(timeIntervalSince1970: defaults.double(forKey: estimateGPSCreditedDayKey))
+        let credited = cal.startOfDay(for: creditedDay) == today
+            ? defaults.double(forKey: estimateGPSCreditedMetersKey) : 0
+        let uncredited = max(0, gpsTotal - credited)
+        let reduction = min(max(raw, 0), uncredited)
+        return (raw - reduction, reduction)
+    }
+
+    /// Commit a distance-estimate GPS netting after a successful write (advances the credited
+    /// accumulator so the same GPS meters aren't subtracted again on a later flush).
+    private static func commitDistanceGPSCredit(_ reduction: Double, day today: Date,
+                                                _ defaults: UserDefaults = .standard) {
+        guard reduction > 0 else { return }
+        let cal = Calendar.current
+        let creditedDay = Date(timeIntervalSince1970: defaults.double(forKey: estimateGPSCreditedDayKey))
+        let credited = cal.startOfDay(for: creditedDay) == today
+            ? defaults.double(forKey: estimateGPSCreditedMetersKey) : 0
+        defaults.set(today.timeIntervalSince1970, forKey: estimateGPSCreditedDayKey)
+        defaults.set(credited + reduction, forKey: estimateGPSCreditedMetersKey)
+    }
     /// A day's resting HR is finalized once the day is ~half over, so a pre-dawn flush can't
     /// freeze a partial-night value, yet last night's RHR still lands the same day (by midday).
     private static let restingFinalizationDelay: TimeInterval = 12 * 3600

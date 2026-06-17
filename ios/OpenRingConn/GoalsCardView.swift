@@ -35,15 +35,17 @@ struct GoalsCardView: View {
 
     init() {
         let dayStart = Calendar.current.startOfDay(for: Date())
-        let hourStart = Calendar.current.dateInterval(of: .hour, for: Date())?.start ?? Date()
         let hrKind = MetricKind.heartRate.rawValue
 
         _todayDaily = Query(
             filter: #Predicate<StoredDaily> { $0.day == dayStart },
             sort: \.day)
 
+        // Count ALL of today's HR (no upper-hour cap) so this card matches CaloriesCardView and
+        // doesn't lag up to 59 min behind it — e.g. right after an on-demand measurement. The
+        // stable `dayStart` lower bound already keeps the @Query descriptor stable.
         _todayHR = Query(FetchDescriptor<StoredSample>(
-            predicate: #Predicate { $0.kindRaw == hrKind && $0.start >= dayStart && $0.start <= hourStart && $0.value > 0 },
+            predicate: #Predicate { $0.kindRaw == hrKind && $0.start >= dayStart && $0.value > 0 },
             sortBy: [SortDescriptor(\.start, order: .forward)]))
 
         var sleepDesc = FetchDescriptor<StoredSleepSummary>(
@@ -106,7 +108,7 @@ struct GoalsCardView: View {
                          goal: "\(stepsGoal.formatted())",
                          color: .green)
                 goalRing(progress: progress.activeKcal,
-                         label: "Active kcal",
+                         label: "Active kcal\u{B9}",
                          current: "\(Int(currentActiveKcal))",
                          goal: "\(Int(activeKcalGoal))",
                          color: .orange)
@@ -121,7 +123,7 @@ struct GoalsCardView: View {
                          goal: formatDuration(sleepGoalMin),
                          color: .purple)
             }
-            Text("\u{B9} Activity estimate: elevated HR minutes (basic threshold). Full accuracy follows ring activity-payload decode.")
+            Text("\u{B9} Active calories & activity minutes are estimates derived from heart rate (Edwards-TRIMP / elevated-HR threshold). Full accuracy follows the ring activity-payload decode.")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

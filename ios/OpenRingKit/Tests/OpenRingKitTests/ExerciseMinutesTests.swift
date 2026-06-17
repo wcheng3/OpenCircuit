@@ -37,16 +37,37 @@ final class ExerciseMinutesTests: XCTestCase {
 
     // MARK: Basic elevated estimate
 
-    func testSingleElevatedPointSampleGivesOneEpoch() {
-        // One point sample at threshold → 1 epoch (150s = 2.5 min)
+    func testSingleIsolatedPointSampleGivesNoFullEpoch() {
+        // One ISOLATED elevated point read (e.g. a single live-HR spot read) must NOT be
+        // credited a full 2.5-min epoch — a lone spot read isn't evidence of exercise (#82 fix).
         let s = HRSample(bpm: 100, start: t0, end: t0)
         let minutes = ExerciseMinutes.estimate(hrSamples: [s], maxHR: 180,
                                                epochSeconds: 150)
-        XCTAssertEqual(minutes, 2.5, accuracy: 0.01)
+        XCTAssertEqual(minutes, 0, accuracy: 0.01)
+    }
+
+    func testIsolatedPointSampleHonorsCustomWidth() {
+        // An isolated point read gets the caller-supplied small width, not a full epoch.
+        let s = HRSample(bpm: 100, start: t0, end: t0)
+        let minutes = ExerciseMinutes.estimate(hrSamples: [s], maxHR: 180,
+                                               epochSeconds: 150, pointSampleWidth: 30)
+        XCTAssertEqual(minutes, 0.5, accuracy: 0.01)   // 30 s
+    }
+
+    func testTwoConsecutivePointsCountAsSustained() {
+        // Two point reads within one epoch ⇒ a sustained run ⇒ each gets a full epoch.
+        let epoch: TimeInterval = 150
+        let samples = [0, 150].map { offset in
+            HRSample(bpm: 100, start: t0.addingTimeInterval(Double(offset)), end: t0.addingTimeInterval(Double(offset)))
+        }
+        let minutes = ExerciseMinutes.estimate(hrSamples: samples, maxHR: 180, epochSeconds: epoch)
+        // [0,150) + [150,300) → merged [0,300] = 5 min
+        XCTAssertEqual(minutes, 5.0, accuracy: 0.01)
     }
 
     func testThreeConsecutiveEpochs() {
-        // Three point samples at t=0, 150, 300 → merges to [0, 450s] = 7.5 min
+        // Three point samples at t=0, 150, 300 → consecutive run → merges to [0, 450s] = 7.5 min.
+        // Bulk-epoch behavior is preserved: back-to-back elevated epochs still count in full.
         let epoch: TimeInterval = 150
         let samples = [0, 150, 300].map { offset in
             HRSample(bpm: 100, start: t0.addingTimeInterval(Double(offset)), end: t0.addingTimeInterval(Double(offset)))
@@ -57,13 +78,16 @@ final class ExerciseMinutesTests: XCTestCase {
     }
 
     func testGapBetweenElevatedRuns() {
-        // Two isolated elevated samples with a 10-min gap → two separate intervals
+        // Two separate sustained runs (each ≥2 consecutive points) split by a 10-min gap stay
+        // as two intervals; isolated reads within neither run do not inflate the total.
         let epoch: TimeInterval = 150
-        let s1 = HRSample(bpm: 100, start: t0, end: t0)
-        let s2 = HRSample(bpm: 100, start: t0.addingTimeInterval(600), end: t0.addingTimeInterval(600))
-        let minutes = ExerciseMinutes.estimate(hrSamples: [s1, s2], maxHR: 180, epochSeconds: epoch)
-        // Two separate 150s intervals = 5 min total
-        XCTAssertEqual(minutes, 5.0, accuracy: 0.01)
+        func run(at base: Double) -> [HRSample] {
+            [base, base + 150].map { HRSample(bpm: 100, start: t0.addingTimeInterval($0), end: t0.addingTimeInterval($0)) }
+        }
+        let samples = run(at: 0) + run(at: 1200)
+        let minutes = ExerciseMinutes.estimate(hrSamples: samples, maxHR: 180, epochSeconds: epoch)
+        // Two separate [x, x+300] runs = 5 min + 5 min = 10 min
+        XCTAssertEqual(minutes, 10.0, accuracy: 0.01)
     }
 
     func testSampleWithRealDurationIsUsed() {
@@ -77,26 +101,26 @@ final class ExerciseMinutesTests: XCTestCase {
     // MARK: Sleep-window exclusion
 
     func testSleepWindowExcludesElevatedHR() {
-        // Elevated HR samples during sleep → excluded; outside → counted
+        // Elevated HR samples during sleep → excluded; a sustained awake run → counted.
         let epoch: TimeInterval = 150
         let sleep = DateInterval(start: t0.addingTimeInterval(-3600), end: t0.addingTimeInterval(3600))
-        // Inside sleep window (elevated but sleeping)
-        let sleeping = HRSample(bpm: 100, start: t0, end: t0)
-        // Outside sleep window (elevated and awake)
-        let awake = HRSample(bpm: 100, start: t0.addingTimeInterval(7200), end: t0.addingTimeInterval(7200))
+        // Inside sleep window (elevated but sleeping) — two consecutive, all excluded.
+        let sleeping = [0.0, 150.0].map { HRSample(bpm: 100, start: t0.addingTimeInterval($0), end: t0.addingTimeInterval($0)) }
+        // Outside sleep window (elevated and awake) — a sustained run of two.
+        let awake = [7200.0, 7350.0].map { HRSample(bpm: 100, start: t0.addingTimeInterval($0), end: t0.addingTimeInterval($0)) }
 
-        let minutes = ExerciseMinutes.estimate(hrSamples: [sleeping, awake], maxHR: 180,
+        let minutes = ExerciseMinutes.estimate(hrSamples: sleeping + awake, maxHR: 180,
                                                sleepWindow: sleep, epochSeconds: epoch)
-        // Only awake sample counted: 1 epoch = 2.5 min
-        XCTAssertEqual(minutes, 2.5, accuracy: 0.01)
+        // Only the awake run counted: [7200,7500] = 5 min
+        XCTAssertEqual(minutes, 5.0, accuracy: 0.01)
     }
 
     func testNoExclusionWhenNoSleepWindow() {
         let epoch: TimeInterval = 150
-        let s = HRSample(bpm: 100, start: t0, end: t0)
-        let minutes = ExerciseMinutes.estimate(hrSamples: [s], maxHR: 180,
+        let samples = [0.0, 150.0].map { HRSample(bpm: 100, start: t0.addingTimeInterval($0), end: t0.addingTimeInterval($0)) }
+        let minutes = ExerciseMinutes.estimate(hrSamples: samples, maxHR: 180,
                                                sleepWindow: nil, epochSeconds: epoch)
-        XCTAssertEqual(minutes, 2.5, accuracy: 0.01)
+        XCTAssertEqual(minutes, 5.0, accuracy: 0.01)
     }
 
     // MARK: Interval merging

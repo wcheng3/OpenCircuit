@@ -136,21 +136,30 @@ public enum TrendsEngine {
 
     // MARK: - Sleep regularity
 
-    /// Sleep regularity score 0–100: how consistent bedtime and wake time are across
-    /// the `window` nights. Based on the variance of bedtime offsets (minutes from midnight).
-    /// A low-variance schedule scores near 100; a high-variance one scores near 0.
-    /// nil when fewer than 2 nights have valid window data.
+    /// Sleep regularity score 0–100: how consistent bedtime is across the `window` nights.
+    /// Bedtime is "minutes since midnight" — a CIRCULAR quantity (23:58 and 00:02 are 4 min
+    /// apart, not 1436), so we use circular statistics: map each minute to an angle, take the
+    /// mean resultant length R, and convert the circular standard deviation back to minutes.
+    /// A tight near-midnight cluster therefore scores near 100 (a plain linear variance would
+    /// wrongly score the most-regular midnight sleeper as the MOST irregular). A widely spread
+    /// schedule scores near 0. nil when fewer than 2 nights have valid window data.
     public static func sleepRegularity(
         bedtimeMinutes: [Int],   // minutes since midnight for each night
         window: Int = 7
     ) -> Int? {
         let tail = Array(bedtimeMinutes.suffix(window))
         guard tail.count >= 2 else { return nil }
-        let mean = Double(tail.reduce(0, +)) / Double(tail.count)
-        let variance = tail.map { pow(Double($0) - mean, 2) }.reduce(0, +) / Double(tail.count)
-        let stdDev = sqrt(variance)
+        let n = Double(tail.count)
+        let angles = tail.map { 2.0 * Double.pi * Double($0) / 1440.0 }
+        let meanCos = angles.map(cos).reduce(0, +) / n
+        let meanSin = angles.map(sin).reduce(0, +) / n
+        // Mean resultant length R ∈ [0, 1]: 1 = perfectly clustered, 0 = uniformly spread.
+        let R = min(max((meanCos * meanCos + meanSin * meanSin).squareRoot(), 0), 1)
+        // Circular standard deviation (radians) = sqrt(-2 ln R); R→0 ⇒ maximal spread (π rad).
+        let circStdDevRad = R > 1e-9 ? (-2.0 * Foundation.log(R)).squareRoot() : Double.pi
+        let stdDevMinutes = circStdDevRad * 1440.0 / (2.0 * Double.pi)
         // Map stdDev → score: 0 min SD = 100, 60+ min SD = 0.
-        let score = max(0, Int((1.0 - stdDev / 60.0) * 100.0))
+        let score = max(0, Int((1.0 - stdDevMinutes / 60.0) * 100.0))
         return min(score, 100)
     }
 

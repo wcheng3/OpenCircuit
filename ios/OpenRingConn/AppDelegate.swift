@@ -1,12 +1,19 @@
 import BackgroundTasks
 import SwiftData
 import UIKit
+import UserNotifications
 
-final class AppDelegate: NSObject, UIApplicationDelegate {
+final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private let scheduler = BackgroundRefreshScheduler()
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // Show health alerts / reminders even when the app is in the FOREGROUND — which is the
+        // primary moment they're evaluated (scenePhase==.active and on sync completion). Without
+        // a delegate returning presentation options, iOS silently suppresses foreground-delivered
+        // local notifications, so the user would see nothing and the backoff would still record a
+        // fire — making them miss the alert entirely.
+        UNUserNotificationCenter.current().delegate = self
         scheduler.register { task in
             guard let refreshTask = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
@@ -95,6 +102,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             scheduler.scheduleProcessing()
             task.setTaskCompleted(success: false)
         }
+    }
+
+    /// Present locally-posted notifications as a banner+sound+list entry while the app is in the
+    /// foreground (default iOS behavior is to suppress them). Health alerts and reminders are
+    /// evaluated mostly in the foreground, so this is what makes them actually visible.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification) async
+        -> UNNotificationPresentationOptions {
+        [.banner, .sound, .list]
     }
 
     /// Fire debounced local notifications for silent-failure conditions after a background run.

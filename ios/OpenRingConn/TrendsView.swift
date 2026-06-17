@@ -225,6 +225,10 @@ struct TrendsView: View {
         var stepsByDay: [Date: Int] = [:]
         for d in dailies { stepsByDay[cal.startOfDay(for: d.day)] = d.steps }
 
+        // Index summaries by start-of-day night.
+        var summaryByNight: [Date: StoredSleepSummary] = [:]
+        for s in summaries { summaryByNight[cal.startOfDay(for: s.night)] = s }
+
         // Pre-fetch all sleep-window vitals samples from the lookback window (one query per kind)
         // then filter per-night in memory — avoids N×4 queries.
         let hrSamples   = (try? store.samples(kind: .heartRate,       from: lookbackStart, to: now)) ?? []
@@ -232,11 +236,15 @@ struct TrendsView: View {
         let spo2Samples = (try? store.samples(kind: .spo2,            from: lookbackStart, to: now)) ?? []
         let rrSamples   = (try? store.samples(kind: .respiratoryRate, from: lookbackStart, to: now)) ?? []
 
-        // Build daily points from summaries (oldest→newest)
-        points = summaries.reversed().map { s in
-            let night = s.night
-            let window = s.inBedStart > Date.distantPast
-                ? DateInterval(start: s.inBedStart, end: s.inBedEnd) : nil
+        // Build one point per day across the UNION of sleep-summary nights and daily-step days,
+        // so the Activity/Steps chart renders from step history even on days with no overnight
+        // sleep summary (e.g. the user wore the ring by day but not to bed). Both keys are
+        // start-of-day, so they align.
+        let allDays = Set(summaryByNight.keys).union(stepsByDay.keys).sorted()
+        points = allDays.map { day in
+            let s = summaryByNight[day]
+            let window = (s?.inBedStart ?? .distantPast) > Date.distantPast
+                ? DateInterval(start: s!.inBedStart, end: s!.inBedEnd) : nil
 
             func avg(_ samples: [QuantitySample], minVal: Double = 0) -> Double? {
                 guard let w = window else { return nil }
@@ -248,12 +256,12 @@ struct TrendsView: View {
             }
 
             return TrendsEngine.DailyPoint(
-                date:          night,
-                steps:         stepsByDay[night],
-                sleepMinutes:  s.asleepMin > 0 ? s.asleepMin : nil,
-                sleepScore:    s.sleepScore > 0 ? s.sleepScore : nil,
-                stressScore:   s.stressScore > 0 ? s.stressScore : nil,
-                skinTempC:     s.skinTempC > 0 ? s.skinTempC : nil,
+                date:          day,
+                steps:         stepsByDay[day],
+                sleepMinutes:  (s?.asleepMin ?? 0) > 0 ? s?.asleepMin : nil,
+                sleepScore:    (s?.sleepScore ?? 0) > 0 ? s?.sleepScore : nil,
+                stressScore:   (s?.stressScore ?? 0) > 0 ? s?.stressScore : nil,
+                skinTempC:     (s?.skinTempC ?? 0) > 0 ? s?.skinTempC : nil,
                 sleepHRAvg:    avg(hrSamples, minVal: TrendsEngine.minValidHR),
                 sleepHRVAvg:   avg(hrvSamples),
                 sleepSpO2Avg:  avg(spo2Samples),

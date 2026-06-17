@@ -134,15 +134,17 @@ final class WorkoutSessionManager: NSObject {
         hrPollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
-                await MainActor.run { self?.collectHRSnapshot() }
+                guard let self else { break }   // self-terminate if the manager went away
+                await MainActor.run { self.collectHRSnapshot() }
             }
         }
         // Elapsed-time ticker (1 s resolution).
         timerTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
+                guard let self else { break }   // self-terminate if the manager went away
                 await MainActor.run {
-                    guard let self, let start = self.sessionStart else { return }
+                    guard let start = self.sessionStart else { return }
                     self.elapsedSeconds = Date().timeIntervalSince(start)
                 }
             }
@@ -213,6 +215,11 @@ final class WorkoutSessionManager: NSObject {
         elapsedSeconds = 0
         currentHR = nil
     }
+
+    // Belt-and-suspenders: the poll/timer loops capture `self` weakly and `break` as soon as
+    // the manager is deallocated (the `guard let self else { break }` in `start`), so they can
+    // never outlive the manager even without an explicit cancel. Ring teardown
+    // (`stopLiveMonitoring`) is handled by `stop()` via the view's `.onDisappear`. (#75)
 
     // MARK: - HR collection
 
@@ -321,15 +328,24 @@ final class WorkoutSessionManager: NSObject {
             try? await builder.addSamples([energySample])
         }
 
-        // Add distance (GPS — only for outdoor with route)
+        // Add distance (GPS — only for outdoor with route). Pick the correct HK type by sport:
+        // cycling → .distanceCycling; walking/running/hiking → .distanceWalkingRunning. Writing
+        // a cycling ride to the walk/run type would pollute that total (and never show as cycling
+        // distance).
         if let dist = summary.distanceMeters, dist > 0, summary.hasRoute {
-            let distType = HKQuantityType(.distanceWalkingRunning)
+            let isCycling = summary.sport == .cyclingOutdoor
+            let distType = HKQuantityType(isCycling ? .distanceCycling : .distanceWalkingRunning)
             let q = HKQuantity(unit: .meter(), doubleValue: dist)
             let distSample = HKQuantitySample(
                 type: distType, quantity: q,
                 start: summary.startDate, end: summary.endDate,
                 metadata: [HKMetadataKeyWasUserEntered: false])
             try? await builder.addSamples([distSample])
+            // Record foot-based GPS distance so the daily steps×stride estimate nets it out and
+            // doesn't double-count this window in Health's Walking + Running Distance total.
+            if !isCycling {
+                HealthKitWriter.recordWorkoutWalkRunDistance(dist)
+            }
         }
 
         // End collection and finish workout

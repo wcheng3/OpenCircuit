@@ -21,6 +21,14 @@ struct WorkoutView: View {
     @State private var manager = WorkoutSessionManager()
     @Environment(\.dismiss) private var dismiss
 
+    /// True while a session is starting/active (recording in progress).
+    private var isRecording: Bool {
+        switch manager.recordingState {
+        case .starting, .active: return true
+        default: return false
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -55,6 +63,16 @@ struct WorkoutView: View {
                     }
                 }
             }
+        }
+        // Block interactive swipe-to-dismiss while recording so the session can't be abandoned
+        // mid-workout (which would leave the ring stuck polling and silently drop the workout).
+        .interactiveDismissDisabled(isRecording)
+        // Guarantee teardown if the sheet is dismissed any other way while still recording:
+        // stop() cancels the poll/timer tasks, calls session.stopLiveMonitoring() (so the ring
+        // stops live-HR polling), and writes the in-progress workout to HealthKit. No-op once
+        // the session has already finished/idled (stop() guards its own state). (#75)
+        .onDisappear {
+            if isRecording { Task { await manager.stop() } }
         }
     }
 

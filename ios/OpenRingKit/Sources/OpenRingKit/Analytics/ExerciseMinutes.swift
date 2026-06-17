@@ -30,9 +30,16 @@ public enum ExerciseMinutes {
     ///
     /// Algorithm:
     /// 1. Filter to samples with HR ≥ threshold and outside the sleep window.
-    /// 2. Map each sample to an interval [start, max(end, start+epochSeconds)] — point
-    ///    samples (start==end) get a one-epoch width so a single elevated bulk record
-    ///    contributes its full epoch instead of 0 seconds.
+    /// 2. Map each sample to an interval. Samples with a real span (end > start) use it
+    ///    directly. POINT samples (start == end) are ambiguous on the wire: a 0x4c bulk
+    ///    sleep-vitals epoch genuinely spans `epochSeconds`, but a live-HR spot read
+    ///    (RingSession persists these as point samples too) represents only an instant.
+    ///    To keep the bulk-epoch behavior without letting one isolated non-exercise spot
+    ///    read inflate the Apple Exercise ring by a full 2.5 min, a point sample gets the
+    ///    full `epochSeconds` width ONLY when it is part of a run of ≥2 consecutive
+    ///    elevated readings spaced within one epoch (back-to-back bulk epochs / sustained
+    ///    elevated HR). An ISOLATED elevated point read gets only `pointSampleWidth`
+    ///    (default 0 — a single spot read is not evidence of voluntary exercise).
     /// 3. Merge overlapping intervals so consecutive elevated epochs are counted once.
     /// 4. Return the sum of merged interval durations in minutes.
     ///
@@ -41,7 +48,8 @@ public enum ExerciseMinutes {
         hrSamples: [HRSample],
         maxHR: Int,
         sleepWindow: DateInterval? = nil,
-        epochSeconds: TimeInterval = TimeInterval(BulkRecord.epochSeconds)
+        epochSeconds: TimeInterval = TimeInterval(BulkRecord.epochSeconds),
+        pointSampleWidth: TimeInterval = 0
     ) -> Double {
         let thresh = threshold(maxHR: maxHR)
         let elevated = hrSamples
@@ -53,11 +61,18 @@ public enum ExerciseMinutes {
 
         guard !elevated.isEmpty else { return 0 }
 
-        // Build intervals: point samples get one epoch width.
-        let intervals: [(Date, Date)] = elevated.map { s in
+        // Build intervals. Real-span samples use their own duration. A point sample gets a
+        // full epoch only when it neighbours another elevated reading within one epoch
+        // (a sustained run); an isolated point read gets only `pointSampleWidth`.
+        let intervals: [(Date, Date)] = elevated.enumerated().map { idx, s in
             let dur = s.end.timeIntervalSince(s.start)
-            let end = dur > 0 ? s.end : s.start.addingTimeInterval(epochSeconds)
-            return (s.start, end)
+            if dur > 0 { return (s.start, s.end) }
+            let prevClose = idx > 0
+                && s.start.timeIntervalSince(elevated[idx - 1].start) <= epochSeconds
+            let nextClose = idx < elevated.count - 1
+                && elevated[idx + 1].start.timeIntervalSince(s.start) <= epochSeconds
+            let width = (prevClose || nextClose) ? epochSeconds : pointSampleWidth
+            return (s.start, s.start.addingTimeInterval(width))
         }
 
         // Merge overlapping / adjacent intervals.

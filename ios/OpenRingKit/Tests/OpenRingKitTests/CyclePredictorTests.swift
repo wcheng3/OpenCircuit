@@ -166,6 +166,33 @@ final class CyclePredictorTests: XCTestCase {
         XCTAssertEqual(durDays, 5, accuracy: 0.01)
     }
 
+    func testPredict_RollsForwardWhenLoggingWentStale() {
+        // User logged two cycles long ago then stopped (last period 90 days ago, 28-day cycle).
+        // The naive next-period (last + 28d) is in the PAST; predict() must roll it forward so
+        // the "next" period and its ovulation/fertile window are all in the FUTURE.
+        let now = cal.startOfDay(for: Date())
+        let p1 = CyclePredictor.PeriodEntry(start: daysAgo(118))
+        let p2 = CyclePredictor.PeriodEntry(start: daysAgo(90))
+        let pred = CyclePredictor.predict(from: [p1, p2], now: now)!
+
+        XCTAssertGreaterThan(pred.nextPeriodStart, now, "next period must be in the future")
+        XCTAssertGreaterThan(pred.ovulationEstimate, now, "ovulation must be in the future")
+        XCTAssertGreaterThan(pred.fertileWindowStart, now, "fertile window must be in the future")
+        // It must be the FIRST future occurrence: rolling back one whole cycle lands at/before now.
+        let oneCycle = pred.avgCycleLengthDays * 86_400
+        XCTAssertLessThan(pred.nextPeriodStart.addingTimeInterval(-oneCycle), now,
+                          "must not over-roll past the first future cycle")
+    }
+
+    func testPredict_DoesNotRollForwardWhenAlreadyFuture() {
+        // Last period today → naive next (today + 28d) is already future → no roll-forward.
+        let now = cal.startOfDay(for: Date())
+        let p1 = CyclePredictor.PeriodEntry(start: daysAgo(28))
+        let p2 = CyclePredictor.PeriodEntry(start: daysAgo(0))
+        let pred = CyclePredictor.predict(from: [p1, p2], now: now)!
+        XCTAssertEqual(cal.startOfDay(for: pred.nextPeriodStart), daysFromNow(28))
+    }
+
     func testPredict_UsesLoggedPeriodDuration() {
         let p1 = CyclePredictor.PeriodEntry(start: daysAgo(28), end: daysAgo(24))  // 4 days
         let p2 = CyclePredictor.PeriodEntry(start: daysAgo(0))

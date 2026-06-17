@@ -161,11 +161,15 @@ struct CycleCalendarView: View {
             }
         }
         .sheet(isPresented: $showLogSheet) {
+            // Capture the original start so editing can RELOCATE the row (not duplicate it) if
+            // the user changes the start date, and reset the HK watermark on a clinical change.
+            let originalStart = editingEntry?.start
             PeriodLogSheet(editing: editingEntry) { start, end, flow, symptoms, notes in
                 let store = LocalStore(modelContext)
                 try? store.savePeriodEntry(
                     start: start, end: end, flowLevelRaw: flow.rawValue,
-                    symptoms: symptoms.map(\.rawValue), notes: notes)
+                    symptoms: symptoms.map(\.rawValue), notes: notes,
+                    originalStart: originalStart)
             }
         }
     }
@@ -392,10 +396,14 @@ struct CycleCalendarView: View {
             } label: {
                 Image(systemName: "pencil").foregroundStyle(.secondary)
             }
-            // Delete button
+            // Delete button — also removes the previously-written Apple Health sample(s) so a
+            // deleted period doesn't leave an orphaned menstrual-flow entry in Health.
             Button(role: .destructive) {
                 let store = LocalStore(modelContext)
-                try? store.deletePeriodEntry(start: entry.start)
+                let staleUUIDs = (try? store.deletePeriodEntry(start: entry.start)) ?? []
+                if !staleUUIDs.isEmpty {
+                    Task { await HealthKitWriter().deleteMenstrualFlowSamples(uuidStrings: staleUUIDs) }
+                }
             } label: {
                 Image(systemName: "trash").foregroundStyle(.red.opacity(0.8))
             }

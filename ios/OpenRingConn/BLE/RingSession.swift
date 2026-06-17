@@ -1128,6 +1128,11 @@ extension RingSession: CBPeripheralDelegate {
                 if !self.gotDataFrame { self.gotDataFrame = true }
                 if self.notStreaming { self.notStreaming = false }
                 self.streamWatchdogTask?.cancel(); self.streamWatchdogTask = nil
+                // Durable "last ring data received" timestamp for the wear reminder (#84): a real
+                // data frame proves the ring is worn/streaming. Persisted (unlike the in-memory
+                // `lastFrameAt`) so a cold foreground doesn't falsely fire "put your ring back on".
+                UserDefaults.standard.set(Date().timeIntervalSince1970,
+                                          forKey: ReminderDefaults.lastRingDataAt)
             }
             // Frames arriving while the link isn't `ready` mean discovery didn't land on this
             // (restored) reconnect — re-run it so we can ack and the buttons enable. #reconnect

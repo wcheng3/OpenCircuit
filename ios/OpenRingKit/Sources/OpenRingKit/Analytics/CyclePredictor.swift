@@ -156,18 +156,27 @@ public enum CyclePredictor {
     ///   - skinTempDeviations: Optional nightly signed offsets (°C above baseline)
     ///     from `SkinTempBaseline.offset`. Used as a SOFT corroboration signal only —
     ///     clearly labeled as such in the UI. Pass `[]` when unavailable.
+    ///   - now: Reference "present" used to roll the prediction forward (injected for
+    ///     deterministic tests). The next period is always in the future relative to this.
     ///
     /// - Returns: `nil` when fewer than `minPeriodsForPrediction` valid cycles exist.
     public static func predict(
         from periods: [PeriodEntry],
-        skinTempDeviations: [(night: Date, offsetC: Double)] = []
+        skinTempDeviations: [(night: Date, offsetC: Double)] = [],
+        now: Date = Date()
     ) -> CyclePrediction? {
         guard let stats = cycleStats(from: periods) else { return nil }
         let sorted = periods.sorted { $0.start < $1.start }
         guard let lastPeriod = sorted.last else { return nil }
 
         let cycleInterval = stats.avgCycleLengthDays * 86_400
-        let nextStart = lastPeriod.start.addingTimeInterval(cycleInterval)
+        // One cycle after the last LOGGED period — then roll forward by whole cycles until it
+        // is in the future, so a user who stopped logging for ≥1 cycle still sees the NEXT
+        // period (and a future fertile/ovulation window) rather than a date already elapsed.
+        var nextStart = lastPeriod.start.addingTimeInterval(cycleInterval)
+        if cycleInterval > 0 {
+            while nextStart < now { nextStart = nextStart.addingTimeInterval(cycleInterval) }
+        }
 
         let durationDays = stats.avgPeriodDurationDays ?? 5.0   // default 5 days
         let nextEnd = nextStart.addingTimeInterval(durationDays * 86_400)

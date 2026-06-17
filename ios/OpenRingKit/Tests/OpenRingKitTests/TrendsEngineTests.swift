@@ -106,4 +106,22 @@ final class TrendsEngineTests: XCTestCase {
     func testSleepRegularityInsufficientData() {
         XCTAssertNil(TrendsEngine.sleepRegularity(bedtimeMinutes: [22 * 60]))
     }
+
+    func testSleepRegularityTightClusterAroundMidnight() {
+        // A very consistent near-midnight sleeper: [23:58, 00:02, 23:55, 00:05, 00:00, 23:57, 00:03]
+        // → true spread ~10 min. Linear variance would treat these as ~1440 min apart and score 0;
+        // circular statistics must score this near-perfect (≥ 90).
+        let minutes = [1438, 2, 1435, 5, 0, 1437, 3]
+        let score = TrendsEngine.sleepRegularity(bedtimeMinutes: minutes) ?? 0
+        XCTAssertGreaterThanOrEqual(score, 90, "tight midnight-wrap cluster should be highly regular")
+    }
+
+    func testSleepRegularityWrapEquivalentToShifted() {
+        // Same spread, once straddling midnight and once shifted to noon → identical score
+        // (rotation-invariance is the whole point of circular statistics).
+        let aroundMidnight = [1438, 2, 1435, 5, 0, 1437, 3]
+        let aroundNoon = aroundMidnight.map { ($0 + 720) % 1440 }
+        XCTAssertEqual(TrendsEngine.sleepRegularity(bedtimeMinutes: aroundMidnight),
+                       TrendsEngine.sleepRegularity(bedtimeMinutes: aroundNoon))
+    }
 }

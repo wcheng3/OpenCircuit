@@ -30,6 +30,12 @@ enum ReminderDefaults {
     /// Read by `evaluateReminders` to decide whether the user has been sedentary.
     static let lastActivityAt = "reminder.lastActivityAt"
 
+    /// UserDefaults key written by RingSession whenever ANY ring data frame arrives. DURABLE
+    /// (survives session teardown on background/disconnect), unlike the ephemeral
+    /// `session.lastFrameAt` which resets to nil on a cold launch. The wear reminder reads this
+    /// so it tracks actual "ring data went silent" rather than transient BLE-connection state.
+    static let lastRingDataAt = "reminder.lastRingDataAt"
+
     static func register(_ d: UserDefaults = .standard) {
         d.register(defaults: [
             sedentaryEnabled:    true,
@@ -157,19 +163,28 @@ struct HealthNotificationCenter {
         let thresholds = HealthAlertDefaults.thresholds()
         let instantSince = now.addingTimeInterval(-Self.instantLookback)
         let inactiveSince = now.addingTimeInterval(-Self.inactiveLookback)
+        let lastFired = store.lastFired()
+        // Only consider HR/SpO2 readings NEWER than the last time that notification fired, so a
+        // single morning spike alerts ONCE rather than re-firing every backoff window (the 2h
+        // backoff is shorter than the 12h lookback, so without this the worst reading in the
+        // window would keep being re-returned and re-announced for hours). (#73 fix)
+        let hrSince = max(instantSince, lastFired[.highHR] ?? .distantPast)
+        let spo2Since = max(instantSince, lastFired[.lowSpO2] ?? .distantPast)
 
         // Stored readings + the just-synced in-memory batch (so a fresh sync is reflected at once).
         var hr = ((try? localStore.recentSamples(kind: .heartRate, since: instantSince)) ?? [])
+            .filter { $0.start > hrSince }
             .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
         var spo2 = ((try? localStore.recentSamples(kind: .spo2, since: instantSince)) ?? [])
+            .filter { $0.start > spo2Since }
             .map { SpO2Reading(percent: Int(($0.value * 100).rounded()), time: $0.start) }
         let inactiveHR = ((try? localStore.recentSamples(kind: .heartRate, since: inactiveSince)) ?? [])
             .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
 
         if let synced = session?.historySamples {
-            hr += synced.filter { $0.kind == .heartRate && $0.value > 0 && $0.start >= instantSince }
+            hr += synced.filter { $0.kind == .heartRate && $0.value > 0 && $0.start > hrSince }
                 .map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
-            spo2 += synced.filter { $0.kind == .spo2 && $0.value > 0 && $0.start >= instantSince }
+            spo2 += synced.filter { $0.kind == .spo2 && $0.value > 0 && $0.start > spo2Since }
                 .map { SpO2Reading(percent: Int(($0.value * 100).rounded()), time: $0.start) }
         }
 
@@ -186,7 +201,7 @@ struct HealthNotificationCenter {
 
         // --- Route survivors through the ONE shared gate (quiet hours + backoff) ---------------
         let quiet = HealthAlertDefaults.quietHours()
-        let fire = gate.filter(candidates, now: now, lastFired: store.lastFired(), quietHours: quiet)
+        let fire = gate.filter(candidates, now: now, lastFired: lastFired, quietHours: quiet)
         guard !fire.isEmpty, await ensureAuthorized() else { return }
         for n in fire { await post(n, hit: hitByNotif[n]) }
         store.markFired(fire, at: now)
@@ -257,7 +272,13 @@ struct HealthNotificationCenter {
             let r = WearReminder()
             // "ever connected" = a peripheral ID has been persisted by RingScanner.
             let hasSavedRing = d.string(forKey: "com.openringconn.ring.peripheralID") != nil
-            let lastData = session?.lastFrameAt
+            // Use the DURABLE last-frame timestamp (survives cold launch / session teardown), not
+            // the ephemeral session value — otherwise the reminder fires "Put your ring back on"
+            // on every cold foreground while the ring is actually worn and merely reconnecting.
+            // Take the most recent of the durable and (if present) live session timestamps.
+            let durableEpoch = d.double(forKey: ReminderDefaults.lastRingDataAt)
+            let durable: Date? = durableEpoch > 0 ? Date(timeIntervalSince1970: durableEpoch) : nil
+            let lastData = [durable, session?.lastFrameAt].compactMap { $0 }.max()
             if r.shouldFire(lastRingDataAt: lastData, now: now, everConnected: hasSavedRing) {
                 candidates.append(.wearReminder)
             }
@@ -309,11 +330,26 @@ struct HealthNotificationCenter {
         }
     }
 
+    /// Body-vital alerts carry the medical disclaimer; #84 lifestyle reminders and the #86
+    /// charging-complete banner do NOT (they aren't sensor-vital readings). This matches the
+    /// stated intent in `copy(for:)` ("no medical disclaimer appended — they're lifestyle
+    /// reminders"), which the previous unconditional append in `post` contradicted.
+    private static func appendsDisclaimer(_ n: HealthNotification) -> Bool {
+        switch n {
+        case .highHR, .lowSpO2, .elevatedHRInactive,
+             .skinTempRise, .skinTempDrop, .skinTempFluctuationRise, .skinTempFluctuationDrop,
+             .fever:
+            return true
+        case .sedentaryReminder, .wearReminder, .bedtimeReminder, .chargingComplete:
+            return false
+        }
+    }
+
     private func post(_ n: HealthNotification, hit: HealthAlertHit?) async {
         let content = UNMutableNotificationContent()
         let copy = Self.copy(for: n, hit: hit)
         content.title = copy.title
-        content.body = copy.body + "\n\n" + Self.disclaimer
+        content.body = Self.appendsDisclaimer(n) ? copy.body + "\n\n" + Self.disclaimer : copy.body
         content.sound = .default
         // One pending request per condition (stable id) — re-posting just refreshes it.
         let request = UNNotificationRequest(identifier: "alerts.health.\(n.rawValue)",
