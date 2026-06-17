@@ -478,7 +478,9 @@ the `0x10`/`0x87` descriptor `[1]`, §5.4 🟢 — already decoded.)
 `21 49 ac <XX> f4` (4/5 const, device-id-like) · `[34:36]`=16-bit monotonic counter
 ≈ 1/sec (30→1475→9045 over 3 sessions) 🟡.
 
-### 5.8 Per-connection AUTH (the activation gate) 🟢 CRACKED + heartbeat + bonding — issue #54
+### 5.8 Per-connection AUTH (the activation gate) 🟢 CRACKED — issue #54
+> ✅ **Standalone confirmed on-device 2026-06-16:** with the official app logged out, OpenRingConn
+> activated the ring and streamed on its own. No official app needed. (+ heartbeat + bonding below.)
 The `01 01 <…>` arg is a deterministic **challenge→response auth** — what "activates" the ring for
 streaming. Sequence every connect: host `01 00 00` → ring `81 00 <chal> <xor>`; host must answer
 `01 01 <r0> <r1> <r2> 00`. **🟢 ALGORITHM (RE'd 2026-06-16 from the official app's Dart AOT
