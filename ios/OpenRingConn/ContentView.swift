@@ -207,6 +207,14 @@ struct ContentView: View {
             // un-activated/un-bonded signature. Until the activate step is reverse-engineered, the
             // only fix is to open the official app once; say so instead of spinning forever.
             if connected, session?.notStreaming == true { activationHint }
+            // Connected + streaming, but the ring reads off-wrist / on the charger (#56) — surface
+            // it (estimated) instead of silently backing the auto-measure off. notStreaming takes
+            // precedence (an un-activated ring's wear state is meaningless), and we hide it during
+            // an active measurement so it can't contradict the "measuring" cue.
+            if connected, session?.notStreaming != true, session?.monitoring != true,
+               session?.appearsNotWorn == true {
+                notWornHint
+            }
             if !connected {
                 Button {
                     scanner.start()
@@ -233,6 +241,18 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
+    }
+
+    /// Shown when `RingSession.appearsNotWorn` — connected but the ring reads off-wrist / on the
+    /// charger (a proxy from auto-measures that never lock + a cold skin-temp reading, #56). Honest
+    /// that it's an estimate; manual Measure/Sync are never blocked by it.
+    private var notWornHint: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "pause.circle").foregroundStyle(.secondary)
+            Text("Ring looks off-wrist or charging (estimated) — auto-measure paused")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// A user (non-auto) HR measurement that's converging but hasn't locked yet (#45 C). The

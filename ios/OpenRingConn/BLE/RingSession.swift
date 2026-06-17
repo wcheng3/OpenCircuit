@@ -73,6 +73,35 @@ final class RingSession: NSObject {
     /// UI can show a subtle "auto-updating" cue instead of reading as a user measurement.
     private(set) var autoMeasuring = false
 
+    // MARK: Wear gate / not-worn proxy (#56, #41)
+    //
+    // `appearsNotWorn` is true when the ring reads as OFF-WRIST / ON THE CHARGER, inferred from
+    // PROVEN proxies only — periodic auto-measures that never lock (🟢) plus, when available, a
+    // cold raw skin-temp reading (🟡, AutoMeasureGate). NO charging-flag byte is consulted (that
+    // descriptor field is undecoded — #61). It gates only the AUTOMATIC HR/SpO₂ refresh (which on
+    // the charger just times out and drains battery, #56) and a small UI hint; manual Measure /
+    // Sync are never blocked by it. Reset per connection (a new RingSession each connect).
+    private(set) var appearsNotWorn = false
+    /// Consecutive periodic auto-measure cycles that never locked a reading — the 🟢 not-worn
+    /// signal. Reset to 0 on a lock (or cleared by a warm skin-temp reading).
+    private var consecutiveAutoMeasureNoLock = 0
+    /// Most recent RAW skin temp (°C) from the 0x10/0x87 descriptor, updated on EVERY temp frame
+    /// regardless of the night-window / worn persistence gates below — the 🟡 wear proxy. nil
+    /// until the first valid reading.
+    private var lastRawSkinTempC: Double?
+    /// In-memory log of the night's RAW skin-temp readings (worn AND cold), independent of the
+    /// worn-only persistence gate — the ONLY source of the cold readings the sleep wear-gate
+    /// (#41) needs to reclassify a charging block out of sleep (the store keeps worn temps only).
+    /// Bounded rolling buffer; consumed by `wearTemperatureSamples()`.
+    private var nightTemperatureLog: [TemperatureSample] = []
+    private static let nightTemperatureLogCap = 2000
+    /// Cap on the not-worn auto-measure backoff: a ring left on the charger is re-probed at most
+    /// this rarely, but never abandoned — a lock (or warm temp) resumes the base cadence (#56).
+    private static let autoMeasureMaxBackoff: TimeInterval = 2 * 3600
+    /// Cheap re-check cadence while SKIPPING the probe on a confirmed-cold (not-worn) ring: short,
+    /// since it costs no live-enter, so re-wear (temp warming) resumes measurement promptly (#56).
+    private static let autoMeasureColdRecheck: TimeInterval = 180
+
     /// True when frames have stopped for long enough that the live readings (HR/SpO₂/battery/
     /// steps/temp) should read as STALE rather than current (#36). A silently-dropped link keeps
     /// its last values until CoreBluetooth eventually fires `didDisconnect`; this lets the UI
@@ -264,7 +293,8 @@ final class RingSession: NSObject {
             // discards delivered pages, so this is the only chance to keep them.
             if let self, !self.bulkRecords.isEmpty {
                 self.historySamples = BulkSleep.samples(from: self.bulkRecords)
-                self.sleepSegments = BulkSleep.sleepSegments(from: self.bulkRecords)
+                self.sleepSegments = BulkSleep.sleepSegments(from: self.bulkRecords,
+                                                             temperatures: self.wearTemperatureSamples())   // wear gate (#41)
                 self.stagedSegments = BulkSleep.stagedSegments(from: self.bulkRecords)
                 self.persist(self.historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
                 self.persistSleepAndSteps()          // sleep summary + steps for offline display
@@ -391,21 +421,29 @@ final class RingSession: NSObject {
             try? await Task.sleep(for: .seconds(Self.autoMeasureFirstDelay))
             while !Task.isCancelled {
                 guard let self else { return }
-                if Self.autoMeasureEnabled, self.idleForAutoMeasure {
+                if Self.autoMeasureEnabled, self.idleForAutoMeasure, !self.skipAutoMeasureProbe {
                     // Refresh BOTH every cycle — HR locks in seconds when still; SpO₂ rides
                     // the same live path. (Was SpO₂ every 3rd cycle, but relaunches reset that
                     // counter so it rarely fired.) Each is bounded, so a moving hand just times
-                    // out that read rather than blocking the loop.
-                    await self.autoMeasureOnce(mode: .hr, timeout: 90)   // HR can need ~60s of stillness
-                    if self.idleForAutoMeasure {
-                        await self.autoMeasureOnce(mode: .spo2, timeout: 45)
+                    // out that read rather than blocking the loop. The HR result feeds the
+                    // not-worn inference (#56); a user takeover (nil) is not counted.
+                    if let hrLocked = await self.autoMeasureOnce(mode: .hr, timeout: 90) {   // HR can need ~60s of stillness
+                        self.noteAutoMeasureCycle(locked: hrLocked)
                     }
-                    try? await Task.sleep(for: .seconds(Self.autoMeasureInterval))
+                    // Skip SpO₂ if the HR miss above just flipped us to not-worn-with-cold-temp —
+                    // no point spending another live-enter we expect to time out (#56).
+                    if self.idleForAutoMeasure, !self.skipAutoMeasureProbe {
+                        _ = await self.autoMeasureOnce(mode: .spo2, timeout: 45)
+                    }
+                    // Cadence backs off once the ring is inferred not-worn (#56); a lock above
+                    // already reset it to the base interval.
+                    try? await Task.sleep(for: .seconds(self.nextAutoMeasureInterval))
                 } else {
-                    // Disabled, or busy with a user measure / sync — re-check soon rather than
-                    // deferring a full interval (a one-off open-sync shouldn't push the first
-                    // HR out by 10 min).
-                    try? await Task.sleep(for: .seconds(30))
+                    // Disabled, busy with a user measure / sync, or inferred not-worn with a cold
+                    // skin temp (#56) — re-check soon rather than deferring a full interval. A
+                    // not-worn ring is re-checked cheaply (no live-enter) until its temp warms;
+                    // a one-off open-sync shouldn't push the first HR out by 10 min.
+                    try? await Task.sleep(for: .seconds(self.skipAutoMeasureProbe ? Self.autoMeasureColdRecheck : 30))
                 }
             }
         }
@@ -417,25 +455,72 @@ final class RingSession: NSObject {
         ready && !monitoring && !livePreparing && syncTask == nil
     }
 
+    /// Next sleep between auto-measure cycles: the base interval while worn, exponentially backed
+    /// off once the ring is inferred not-worn (#56). Pure policy lives in `AutoMeasureGate`.
+    private var nextAutoMeasureInterval: TimeInterval {
+        AutoMeasureGate.interval(base: Self.autoMeasureInterval,
+                                 cap: Self.autoMeasureMaxBackoff,
+                                 consecutiveNoLock: consecutiveAutoMeasureNoLock,
+                                 rawSkinTempC: lastRawSkinTempC)
+    }
+
+    /// Skip the live-enter probe entirely this cycle (#56): we've inferred not-worn AND the raw
+    /// skin temp still reads cold, so a probe would only time out and burn battery. Requires a
+    /// COLD reading (positive evidence) — a missing temp falls back to probing so a sensor gap
+    /// can't silently stop measuring. Re-wear is caught when the temp warms (the keepalive keeps
+    /// it fresh), which clears `appearsNotWorn`.
+    private var skipAutoMeasureProbe: Bool {
+        appearsNotWorn && (lastRawSkinTempC.map { $0 < ActivityPeriod.wornMinTemperatureC } ?? false)
+    }
+
+    /// Fold one finished auto-measure cycle into the not-worn inference (#56): a lock proves the
+    /// ring is worn (reset the miss count); a miss accrues toward the backoff. Recomputes the
+    /// published `appearsNotWorn`.
+    private func noteAutoMeasureCycle(locked: Bool) {
+        consecutiveAutoMeasureNoLock = locked ? 0 : consecutiveAutoMeasureNoLock + 1
+        refreshWornState()
+    }
+
+    /// Recompute the published not-worn flag from the current proxies (#56). Called after each
+    /// auto-measure cycle and whenever a fresh raw skin temp arrives. Guarded so `@Observable`
+    /// doesn't republish on every (unchanged) temp frame.
+    private func refreshWornState() {
+        let notWorn = AutoMeasureGate.appearsNotWorn(
+            consecutiveNoLock: consecutiveAutoMeasureNoLock,
+            rawSkinTempC: lastRawSkinTempC)
+        if notWorn != appearsNotWorn { appearsNotWorn = notWorn }
+    }
+
+    /// The night's skin-temp samples for the sleep wear-gate (#41): the in-memory log, the only
+    /// place cold/charging readings survive (the store keeps worn temps only). Empty ⇒ detection
+    /// falls back to motion alone (absence of data is not evidence of being unworn).
+    private func wearTemperatureSamples() -> [TemperatureSample] {
+        nightTemperatureLog
+    }
+
     /// One bounded auto-measurement: enter `mode`'s live read, wait for a converged value (or
     /// time out), then stop — which persists the reading and lets ContentView mirror it to
     /// Health. If the user takes over mid-read (monitoring an unexpected mode), we leave their
     /// session alone rather than cancelling it.
-    private func autoMeasureOnce(mode: LiveMode, timeout: TimeInterval) async {
-        guard idleForAutoMeasure else { return }
+    /// Returns whether the read LOCKED, or nil if the cycle was ABORTED by a user takeover — the
+    /// caller must not count an abort toward the not-worn inference (#56).
+    private func autoMeasureOnce(mode: LiveMode, timeout: TimeInterval) async -> Bool? {
+        guard idleForAutoMeasure else { return nil }
         autoMeasuring = true
         startMonitoring(mode: mode, userInitiated: false)   // auto refresh: prompt enter, keep last value until it locks
         let deadline = Date().addingTimeInterval(timeout)
+        var locked = false
         while !Task.isCancelled && Date() < deadline {
-            if mode == .hr, liveHR != nil { break }
-            if mode == .spo2, liveSpO2 != nil { break }
+            if mode == .hr, liveHR != nil { locked = true; break }
+            if mode == .spo2, liveSpO2 != nil { locked = true; break }
             // Bail if a user tap switched the mode out from under us — don't fight them.
-            if !monitoring || liveMode != mode { autoMeasuring = false; return }
+            if !monitoring || liveMode != mode { autoMeasuring = false; return nil }
             try? await Task.sleep(for: .seconds(1))
         }
         // Only tear down if WE still own the live read (user didn't take over).
         if autoMeasuring, monitoring, liveMode == mode { stopLiveMonitoring() }
         autoMeasuring = false
+        return locked
     }
 
     /// Resolve and cache the nightly sleep window used to gate skin-temp capture. Re-resolves
@@ -596,7 +681,8 @@ final class RingSession: NSObject {
         // No-op once the drain already committed (bulkFinalized) or nothing was captured.
         if !bulkRecords.isEmpty, !bulkFinalized {
             historySamples = BulkSleep.samples(from: bulkRecords)
-            sleepSegments = BulkSleep.sleepSegments(from: bulkRecords)
+            sleepSegments = BulkSleep.sleepSegments(from: bulkRecords,
+                                                    temperatures: wearTemperatureSamples())   // wear gate (#41)
             stagedSegments = BulkSleep.stagedSegments(from: bulkRecords)
             persist(historySamples)
             persistSleepAndSteps()
@@ -661,7 +747,8 @@ final class RingSession: NSObject {
     private func finalizeSync() {
         guard syncing else { return }
         historySamples = BulkSleep.samples(from: bulkRecords)
-        sleepSegments = BulkSleep.sleepSegments(from: bulkRecords)
+        sleepSegments = BulkSleep.sleepSegments(from: bulkRecords,
+                                                temperatures: wearTemperatureSamples())   // wear gate (#41)
         stagedSegments = BulkSleep.stagedSegments(from: bulkRecords)
         persist(historySamples)   // auto-persist HR/HRV/SpO2 for the dashboard
         persistSleepAndSteps()    // sleep summary + steps for offline display
@@ -812,6 +899,11 @@ extension RingSession: CBPeripheralDelegate {
             // (activity, ambient swings, intermittent skin contact) to be a usable trend, so we
             // drop them and surface no live value outside the window.
             if let t = DeviceStatus.skinTemperature(bytes) {
+                // Wear proxy (#56/#41): record the RAW reading BEFORE the night-window / worn
+                // gates below. A cold (off-wrist/charging) reading is exactly what the not-worn
+                // inference and the sleep wear-gate need, and neither survives those gates.
+                self.lastRawSkinTempC = t.celsius
+                self.refreshWornState()
                 // Window-miss guard: if we're outside the cached window (or it's nil), the cache
                 // may simply be stale/expired (night just started, or midnight rolled the window
                 // forward). Force a synchronous re-resolve BEFORE deciding to drop — this whole
@@ -825,8 +917,21 @@ extension RingSession: CBPeripheralDelegate {
                     Task { await self.refreshNightWindowIfNeeded() }   // background, don't block the frame
                 }
                 let inNightWindow = self.nightWindow?.contains(Date()) ?? false
-                self.liveTemperature = inNightWindow ? t.celsius : nil
+                let worn = t.celsius >= ActivityPeriod.wornMinTemperatureC
+                // Keep EVERY night reading (worn AND cold) in-memory for the sleep wear-gate's
+                // median test (#41) — the cold ones are what reclassify a charging block out of
+                // sleep. The store (below) keeps worn temps only, so this log is their sole home.
                 if inNightWindow {
+                    self.nightTemperatureLog.append(TemperatureSample(time: Date(), celsius: t.celsius))
+                    if self.nightTemperatureLog.count > Self.nightTemperatureLogCap {
+                        self.nightTemperatureLog.removeFirst(self.nightTemperatureLog.count - Self.nightTemperatureLogCap)
+                    }
+                }
+                // Persist / display ONLY a worn reading: a cold charging reading isn't a skin
+                // temperature, so it must not pollute the nightly average or reach Apple Health
+                // (#41). The cold reading still drives the wear proxies above.
+                self.liveTemperature = (inNightWindow && worn) ? t.celsius : nil
+                if inNightWindow, worn {
                     self.persist([QuantitySample(kind: .temperature, start: Date(), value: t.celsius)])
                 }
             }
