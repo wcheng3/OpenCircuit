@@ -246,6 +246,20 @@ check(SleepScore.score(durationSeconds: 8 * 3600) == 100.0, "8h sleep -> 100")
 check(SleepScore.score(durationSeconds: 4 * 3600) == 50.0, "4h sleep -> 50 (graded ratio, #28)")
 check(SleepScore.score(durationSeconds: 24 * 3600) == 100.0, "24h sleep -> clamped 100")
 
+// RingConn per-connection auth (#54): response = SM3([V, challenge])[-3:], V = XOR of last 3 MAC bytes.
+check(SM3.hash(Array("abc".utf8)).map { String(format: "%02x", $0) }.joined()
+      == "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0", "SM3('abc') KAT")
+let authMac: [UInt8] = [0xf8, 0x79, 0x99, 0xf7, 0x03, 0xad]   // F8:79:99:F7:03:AD → V=0x59
+check(RingAuth.macTailXor(authMac) == 0x59, "RingAuth V = 0x59")
+for (ch, exp) in [(UInt8(0x0f), "4bcce6"), (0xb0, "318267"), (0xe5, "520be1"), (0xf9, "3609b2"), (0x52, "277d7f")] {
+    let got = RingAuth.response(challenge: ch, mac: authMac).map { String(format: "%02x", $0) }.joined()
+    check(got == exp, "RingAuth f(\(String(format: "%02x", ch)))=\(exp)")
+}
+check(RingAuth.authCommand(challenge: 0xb0, mac: authMac) == [0x01, 0x01, 0x31, 0x82, 0x67, 0x00],
+      "RingAuth.authCommand = 01 01 31 82 67 00 for challenge 0xb0")
+check(RingAuth.macFromSystemID([0xf8, 0x79, 0x99, 0xff, 0xfe, 0xf7, 0x03, 0xad]) == authMac,
+      "macFromSystemID parses EUI-64")
+
 // Sleep detection (activity.rs)
 let base = Date(timeIntervalSince1970: 1_700_000_000)
 func reading(_ minutes: Int, _ g: SIMD3<Float>?) -> GravitySample {

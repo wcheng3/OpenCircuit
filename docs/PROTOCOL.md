@@ -478,22 +478,30 @@ the `0x10`/`0x87` descriptor `[1]`, §5.4 🟢 — already decoded.)
 `21 49 ac <XX> f4` (4/5 const, device-id-like) · `[34:36]`=16-bit monotonic counter
 ≈ 1/sec (30→1475→9045 over 3 sessions) 🟡.
 
-### 5.8 Per-connection AUTH (the activation gate) 🟢 + heartbeat + bonding — issue #54
-⚠️ **CORRECTION:** the `01 01 <3-byte nonce>` arg is **NOT arbitrary** — it is a deterministic
-**challenge→response auth**, and it is what "activates" the ring for streaming (🟢, confirmed
-2026-06-16 `login_activate_20260616`). Sequence every connect: host `01 00 00` → ring
-`81 00 <chal> <xor>`; host must answer `01 01 <f(chal)> 00`. `f` is a **256-entry keyed table
-over the 8-bit challenge** (NOT linear/XOR/LCG). 24 (chal→resp) pairs captured, zero collisions
-(`b0→31 82 67` recurs across sessions 12 h apart; the 2026-06-16 login used `e5→52 0b e1`). See
-`Command.knownAuthNonces`.
+### 5.8 Per-connection AUTH (the activation gate) 🟢 CRACKED + heartbeat + bonding — issue #54
+The `01 01 <…>` arg is a deterministic **challenge→response auth** — what "activates" the ring for
+streaming. Sequence every connect: host `01 00 00` → ring `81 00 <chal> <xor>`; host must answer
+`01 01 <r0> <r1> <r2> 00`. **🟢 ALGORITHM (RE'd 2026-06-16 from the official app's Dart AOT
+`libapp.so`, capstone-disassembled; verified against 24 captured pairs + the SM3 KAT):**
 
-**Why this is the "open the official app to activate" gate:** OpenRingConn hardcodes
-`01 01 31 82 67` (= `f(0xb0)`), correct only when the challenge is `0xb0`. When the ring is in a
-strict state it demands the right `f(chal)` for the issued challenge, so our wrong answer → no
-streaming; a logged-in official app answers correctly → the ring streams (and we ride along while
-it stays unlocked). **To be standalone, OpenRingConn must compute `f(chal)` — recover `f` from the
-official APK (`com.gdjztech.ringconn`); 24/256 entries known from captures is not enough.** This is
-LOGIN/auth-tied, **not** app-startup and **not** a re-bond (see bonding below).
+```
+V        = mac[3] ^ mac[4] ^ mac[5]            # XOR of the ring's last 3 BLE-MAC bytes
+response = SM3( bytes([V, challenge]) )[29:32] # last 3 bytes of the 32-byte SM3 digest
+```
+
+`SM3` is the Chinese national 256-bit hash (GB/T 32905). The **only** key material is the ring's
+own MAC — **no cloud key, no app secret** — so it's computable offline for any RingConn. For this
+ring (`F8:79:99:F7:03:AD`): `V = F7^03^AD = 0x59`, e.g. `f(0xe5)=52 0b e1`, `f(0xb0)=31 82 67`. The
+old hardcoded `01 01 31 82 67` was simply `f(0xb0)`, which is why it only worked when the challenge
+happened to be `0xb0`. Impl: `RingAuth.authCommand(challenge:mac:)` (`OpenRingKit/RingAuth.swift`).
+
+**MAC on iOS:** CoreBluetooth hides the MAC, but the ring exposes it via the DIS **System ID**
+characteristic (`0x2a23`, §1) — read it once on connect (`RingAuth.macFromSystemID`).
+
+**This is the "open the official app to activate" gate, now closed:** a client that answers the
+challenge correctly activates the ring's stream itself; OpenRingConn now does this reactively on
+`81 00` (`RingSession` `case 0x81`), so it streams standalone with no official-app dependency. (It's
+per-connection auth — **not** app-startup and **not** a re-bond; see bonding below.)
 
 **Heartbeat 🟢:** ring→host `11 00 <ctr> <tok> <xor>` (~2.5 min idle; `ctr` resets to 01 per
 connection; `tok` = the session token also in `0x10[1]`; `[last]`=XOR). Host replies a constant

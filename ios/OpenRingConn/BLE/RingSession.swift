@@ -140,6 +140,12 @@ final class RingSession: NSObject {
     private let dataServiceUUID = CBUUID(string: OpenRingKit.Transport.dataServiceUUID)
     private let notifyUUID = CBUUID(string: OpenRingKit.Transport.notifyCharUUID)
     private let writeUUID = CBUUID(string: OpenRingKit.Transport.writeCharUUID)
+    /// Device-Information System ID (0x2a23) — carries the ring's 6-byte MAC (§1). iOS hides the MAC
+    /// from CoreBluetooth, but the per-connection auth (#54) needs it, so we read it from here.
+    private let systemIDUUID = CBUUID(string: "2A23")
+    /// The ring's 6-byte BLE MAC, recovered from the System ID characteristic. Drives the auth
+    /// challenge-response (`RingAuth`); nil until read (then we fall back to the legacy fixed auth).
+    private var ringMAC: [UInt8]?
 
     init(peripheral: CBPeripheral, localStore: LocalStore? = nil) {
         self.peripheral = peripheral
@@ -218,7 +224,9 @@ final class RingSession: NSObject {
         let syncOpen = quickLiveRead ? Command.syncAll : Command.syncUpToNow()
         monitorTask = Task { [weak self] in
             // 1. Init + open the sync session at `syncOpen`.
-            for cmd in [Command.status0, Command.status1, syncOpen] {
+            // `status0` elicits the `81 00` auth challenge; the didUpdateValue handler answers it
+            // reactively with the SM3 auth (#54) before `syncOpen` opens the data session.
+            for cmd in [Command.status0, syncOpen] {
                 guard let self, !Task.isCancelled else { return }
                 self.write(cmd)
                 try? await Task.sleep(for: .milliseconds(250))
@@ -326,7 +334,7 @@ final class RingSession: NSObject {
             // (otherwise the very first reading races the reactive refresh and could leak).
             await self?.refreshNightWindowIfNeeded()
             // Prime a status session so the ring answers fetch with the descriptor.
-            for cmd in [Command.status0, Command.status1] {
+            for cmd in [Command.status0] {   // elicits the 81 00 challenge → reactive SM3 auth (#54)
                 guard let self, !Task.isCancelled else { return }
                 self.write(cmd)
                 try? await Task.sleep(for: .milliseconds(250))
@@ -627,7 +635,7 @@ final class RingSession: NSObject {
             // Open at cursor ≈ NOW: the ring streams its un-delivered backlog up to now and
             // advances its own resume pointer (§3). `syncAll`'s far-future cursor returned an
             // empty history — the bug that dropped overnight sleep/HRV/RR.
-            for cmd in [Command.status0, Command.status1, historyOpen, Command.fetch] {
+            for cmd in [Command.status0, historyOpen, Command.fetch] {   // 81 00 challenge → reactive SM3 auth (#54)
                 guard let self else { return }
                 self.write(cmd)
                 try? await Task.sleep(for: .milliseconds(300))
@@ -717,6 +725,8 @@ extension RingSession: CBPeripheralDelegate {
                     peripheral.setNotifyValue(true, for: ch)
                 } else if ch.uuid == self.writeUUID {
                     self.writeChar = ch
+                } else if ch.uuid == self.systemIDUUID, self.ringMAC == nil {
+                    peripheral.readValue(for: ch)   // → MAC for the auth challenge-response (#54)
                 }
             }
             self.ready = (self.notifyChar != nil && self.writeChar != nil)
@@ -734,6 +744,17 @@ extension RingSession: CBPeripheralDelegate {
         guard let data = characteristic.value else { return }
         let bytes = [UInt8](data)
         Task { @MainActor in
+            // System ID read (DIS 0x2a23) — recover the ring's MAC for the auth challenge-response
+            // (#54). Not a ring data frame, so handle + return before the frame logic below.
+            if characteristic.uuid == self.systemIDUUID {
+                if let mac = RingAuth.macFromSystemID(bytes) {
+                    self.ringMAC = mac
+                    ringLog.notice("ring MAC (System ID): \(mac.map { String(format: "%02x", $0) }.joined(separator: ":"), privacy: .public) → auth V=0x\(String(format: "%02x", RingAuth.macTailXor(mac)), privacy: .public)")
+                } else {
+                    ringLog.notice("System ID unparsed (\(bytes.count, privacy: .public)B): \(bytes.map { String(format: "%02x", $0) }.joined(separator: " "), privacy: .public)")
+                }
+                return
+            }
             self.lastFrame = data.map { String(format: "%02x", $0) }.joined(separator: " ")
             self.lastFrameAt = Date()   // freshness anchor for staleness + last-reading timestamp (#36)
             // A DATA frame (anything but the cold `0x81` status reply, which even an un-activated ring
@@ -850,6 +871,18 @@ extension RingSession: CBPeripheralDelegate {
                 self.lastHeartbeatAt = Date()
                 ringLog.debug("← 0x11 heartbeat, ack 91 00 00")
                 self.write(Command.heartbeatAck)
+                return
+            case 0x81:
+                // Auth handshake (#54, §5.8). `81 00 <chal>` (← our `01 00 00`) is the ring's
+                // challenge — reply with `01 01 <SM3([V,chal])[-3:]> 00` so the ring activates its
+                // data stream. Needs the MAC (read from System ID); without it, fall back to the
+                // legacy fixed auth (`status1`), which is only correct when the challenge is 0xb0.
+                if bytes.count >= 3, bytes[1] == 0x00 {
+                    let chal = bytes[2]
+                    let auth = self.ringMAC.map { RingAuth.authCommand(challenge: chal, mac: $0) } ?? Command.status1
+                    ringLog.notice("← 0x81 challenge=0x\(String(format: "%02x", chal), privacy: .public), reply \(self.ringMAC == nil ? "legacy-fixed" : "SM3 auth", privacy: .public)")
+                    self.write(auth)
+                }
                 return
             default: break
             }
