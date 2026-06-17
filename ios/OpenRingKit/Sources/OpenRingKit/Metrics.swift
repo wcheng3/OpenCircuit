@@ -16,6 +16,14 @@ public enum MetricKind: String, Codable, CaseIterable, Sendable {
     case steps
     case activeEnergy
     case sleep            // modeled as SleepSegment, not QuantitySample
+    /// Estimated walking/running distance derived from steps × stride (#81).
+    /// ESTIMATE only — NOT GPS distance. Written to HealthKit `.distanceWalkingRunning`.
+    /// Replaced by decoded device distance once 0x4c activity-epoch [15:22] is decoded (#93).
+    case distance
+    /// Estimated Apple Exercise Time from elevated-HR minutes (#82).
+    /// ESTIMATE only — basic threshold model. Full 4-level intensity follows #93 decode.
+    /// Written to HealthKit `.appleExerciseTime`.
+    case exerciseMinutes
 
     /// Canonical unit each `QuantitySample.value` is expressed in, matching the
     /// HealthKit type it maps to in docs/HEALTHKIT_MAPPING.md.
@@ -28,6 +36,8 @@ public enum MetricKind: String, Codable, CaseIterable, Sendable {
         case .steps: return "count"
         case .activeEnergy: return "kcal"
         case .sleep: return "category"
+        case .distance: return "m"           // meters
+        case .exerciseMinutes: return "min"  // minutes
         }
     }
 
@@ -43,6 +53,8 @@ public enum MetricKind: String, Codable, CaseIterable, Sendable {
         case .steps: return "Steps"
         case .activeEnergy: return "Active Energy"
         case .sleep: return "Sleep"
+        case .distance: return "Distance (est.)"
+        case .exerciseMinutes: return "Exercise Time (est.)"
         }
     }
 }

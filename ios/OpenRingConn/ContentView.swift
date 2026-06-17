@@ -43,6 +43,8 @@ struct ContentView: View {
                     vitalsStatusCard
                     sleepCard
                     caloriesCard
+                    card { GoalsCardView() }
+                    trendsNavigationCard
                     syncCard
                     debugCard
                 }
@@ -360,6 +362,25 @@ struct ContentView: View {
         SleepCardView(liveSegments: session?.stagedSegments ?? [])
     }
 
+    /// 7-day trends nav card — taps through to the full TrendsView (#74).
+    private var trendsNavigationCard: some View {
+        NavigationLink {
+            TrendsView()
+        } label: {
+            card {
+                HStack(spacing: 8) {
+                    Image(systemName: "chart.line.uptrend.xyaxis").foregroundStyle(.purple)
+                    Text("7-DAY TRENDS")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
     /// Calories on the home page (was buried in the profile page). Headline is today's
     /// estimated burn; the reference figures stay as a small secondary line.
     private var caloriesCard: some View {
@@ -505,9 +526,11 @@ struct ContentView: View {
                 lastWrite = "Synced to Health: \(r.samples) samples"
                     + (r.sleepSegments > 0 ? ", \(r.sleepSegments) sleep segs" : "")
                     + (r.steps > 0 ? ", \(r.steps) steps" : "")
+                    + (r.distanceM > 0 ? ", \(Int(r.distanceM.rounded()))m est." : "")
                     + (r.restingDays > 0 ? ", \(r.restingDays) resting HR" : "")
                     + (r.passiveHours > 0 ? ", \(r.passiveHours)h basal" : "")
                     + (r.activeKcal > 0 ? ", \(Int(r.activeKcal.rounded())) active kcal" : "")
+                    + (r.exerciseMinutes > 0 ? ", \(Int(r.exerciseMinutes.rounded()))min exercise est." : "")
                     + (r.naps > 0 ? ", \(r.naps) nap\(r.naps == 1 ? "" : "s")" : "")
             }
         }

@@ -40,6 +40,10 @@ final class HealthKitWriter {
         case .steps: id = .stepCount
         case .activeEnergy: id = .activeEnergyBurned
         case .sleep: return nil
+        // ESTIMATE — steps × stride. See DistanceEstimate.swift for the derivation (#81).
+        case .distance: id = .distanceWalkingRunning
+        // ESTIMATE — elevated HR minutes. Basic threshold; 4-level intensity follows #93 (#82).
+        case .exerciseMinutes: id = .appleExerciseTime
         }
         return HKQuantityType(id)
     }
@@ -55,6 +59,8 @@ final class HealthKitWriter {
         case .steps: return .count()
         case .activeEnergy: return .kilocalorie()
         case .sleep: return .count()                  // unused
+        case .distance: return .meter()              // ESTIMATE — steps × stride
+        case .exerciseMinutes: return .minute()      // ESTIMATE — elevated HR minutes
         }
     }
 
@@ -84,9 +90,12 @@ final class HealthKitWriter {
         var restingDays = 0, passiveHours = 0
         var activeKcal = 0.0
         var naps = 0
+        var distanceM = 0.0         // estimated distance written (#81)
+        var exerciseMinutes = 0.0   // estimated exercise minutes written (#82)
         var wroteAnything: Bool {
             samples > 0 || sleepSegments > 0 || steps > 0
                 || restingDays > 0 || passiveHours > 0 || activeKcal > 0 || naps > 0
+                || distanceM > 0 || exerciseMinutes > 0
         }
     }
 
@@ -115,16 +124,30 @@ final class HealthKitWriter {
         // Naps (#76): each carries its own `healthWritten` flag (NOT the night's `.sleep` cursor),
         // so a daytime nap and the overnight night write independently and never collide.
         result.naps = await flushNaps(store: store)
-        // Steps: the store holds the authoritative pending delta (total − already-written), so
-        // gate on it directly — no live reading needed (this also lets a launch-time flush push
-        // steps the background refresh persisted). HealthKit SUMS stepCount, so writing the
-        // delta lands the day on the running total, not a re-add.
+
+        // Profile is used for distance stride + calorie TRIMP — resolved once here so all three
+        // derived writes use the same snapshot. Body inputs come from the shared profile defaults;
+        // the ring transmits none of them.
+        let profile = Self.storedUserProfile()
+
+        // Steps + distance estimate (#81): write both atomically from the same pending delta.
+        // HealthKit SUMS stepCount / distanceWalkingRunning, so writing the delta lands the
+        // day's running total without re-adding on every sync. Distance is an ESTIMATE
+        // (steps × height-based stride — not GPS) and is labeled as such in HealthKit metadata.
         if let delta = try? store.pendingStepDelta(), delta > 0 {
             let startOfDay = Calendar.current.startOfDay(for: Date())
+            let distanceM = DistanceEstimate.meters(steps: delta, profile: profile)
+            var toWrite: [QuantitySample] = [
+                QuantitySample(kind: .steps, start: startOfDay, end: Date(), value: Double(delta))
+            ]
+            if distanceM > 0 {
+                toWrite.append(QuantitySample(kind: .distance, start: startOfDay, end: Date(), value: distanceM))
+            }
             do {
-                try await write([QuantitySample(kind: .steps, start: startOfDay, end: Date(), value: Double(delta))])
+                try await write(toWrite)
                 try store.advanceStepsWritten(by: delta)
                 result.steps = delta
+                result.distanceM = distanceM
             } catch { /* leave the watermark; retry next flush */ }
         }
         // Derived daily resting HR — one sample per finalized day (#18, #37). Idempotency is a
@@ -132,12 +155,14 @@ final class HealthKitWriter {
         // `hk:` cursor rows belong to the raw-sample mirror above.
         result.restingDays = await flushRestingHR(local: store, sleepSegments: sleepSegments)
 
-        // Energy: passive (hourly BMR) + active (HR-derived Edwards TRIMP). Each carries its own
-        // UserDefaults watermark so repeated flushes never double-count (#37). Body inputs come
-        // from the shared profile defaults — the ring transmits none of them.
-        let profile = Self.storedUserProfile()
+        // Energy: passive (hourly BMR) + active (HR-derived Edwards TRIMP). Watermark-gated (#37).
         result.passiveHours = await flushPassiveCalories(profile: profile)
         result.activeKcal = await flushActiveCalories(local: store, profile: profile)
+
+        // Exercise minutes estimate (#82): elevated-HR minutes outside the sleep window.
+        // ESTIMATE — basic 50% maxHR threshold. Full 4-level intensity follows #93 decode.
+        result.exerciseMinutes = await flushExerciseMinutes(local: store, profile: profile)
+
         return result
     }
 
@@ -205,6 +230,11 @@ final class HealthKitWriter {
     static func metadata(for kind: MetricKind) -> [String: Any]? {
         switch kind {
         case .hrvSDNN: return [hrvStatisticMetadataKey: "RMSSD"]
+        // Distance is an ESTIMATE (steps × height-based stride, not GPS). Tag it so Health
+        // readers can filter or label it appropriately (#81). Replaced by decoded device
+        // distance once the activity-epoch [15:22] payload is decoded (#93).
+        case .distance: return [HKMetadataKeyWasUserEntered: false,
+                                "OpenRingConnDistanceSource": "steps×stride-estimate"]
         default: return nil
         }
     }
@@ -262,6 +292,11 @@ final class HealthKitWriter {
     private static let basalWatermarkKey = "hk.basalEnergy.nextHour" // first hour not yet written
     private static let activeDayKey = "hk.activeEnergy.day"          // start-of-day of the accumulator
     private static let activeWrittenKey = "hk.activeEnergy.writtenKcal"
+    // Exercise minutes (#82) watermark — like active energy, delta-based per day.
+    private static let exerciseDayKey     = "hk.exerciseTime.day"         // start-of-day
+    private static let exerciseWrittenKey = "hk.exerciseTime.writtenMin"  // total minutes already pushed
+    // Metadata key for estimated exercise time samples
+    static let exerciseEstimateMetadataKey = "OpenRingConnExerciseTimeEstimated"
     /// A day's resting HR is finalized once the day is ~half over, so a pre-dawn flush can't
     /// freeze a partial-night value, yet last night's RHR still lands the same day (by midday).
     private static let restingFinalizationDelay: TimeInterval = 12 * 3600
@@ -374,6 +409,54 @@ final class HealthKitWriter {
 
     private static func startOfHour(_ date: Date, _ cal: Calendar = .current) -> Date {
         cal.date(from: cal.dateComponents([.year, .month, .day, .hour], from: date)) ?? date
+    }
+
+    /// Write today's exercise-minute DELTA (elevated-HR minutes not yet pushed to Health),
+    /// returning minutes written. ESTIMATE — basic 50% maxHR threshold (#82).
+    /// Full 4-level intensity (Vigorous/Moderate/Low/Inactive) follows the activity-epoch
+    /// decode (#93). Uses a per-day UserDefaults accumulator identical to active energy.
+    private func flushExerciseMinutes(local: LocalStore, profile: UserProfile) async -> Double {
+        let cal = Calendar.current
+        let now = Date()
+        let today = cal.startOfDay(for: now)
+        let defaults = UserDefaults.standard
+        let storedDay = Date(timeIntervalSince1970: defaults.double(forKey: Self.exerciseDayKey))
+        var writtenMin = defaults.double(forKey: Self.exerciseWrittenKey)
+        if cal.startOfDay(for: storedDay) != today { writtenMin = 0 }
+
+        guard let rawSamples = try? local.samples(kind: .heartRate, from: today, to: now),
+              !rawSamples.isEmpty else {
+            defaults.set(today.timeIntervalSince1970, forKey: Self.exerciseDayKey)
+            defaults.set(writtenMin, forKey: Self.exerciseWrittenKey)
+            return 0
+        }
+        // Exclude the latest detected sleep window so sleeping elevated HR doesn't count.
+        let sleepWindow: DateInterval? = (try? local.latestSleepSummary()).flatMap { s in
+            guard s.inBedStart > Date.distantPast else { return nil }
+            return DateInterval(start: s.inBedStart, end: s.inBedEnd)
+        }
+        let hrSamples = rawSamples.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
+        let maxHR = max(220 - profile.age, 1)
+        let totalMin = ExerciseMinutes.estimate(hrSamples: hrSamples, maxHR: maxHR,
+                                                sleepWindow: sleepWindow)
+        let pendingMin = totalMin - writtenMin
+        guard pendingMin >= 1.0 else {
+            defaults.set(today.timeIntervalSince1970, forKey: Self.exerciseDayKey)
+            defaults.set(writtenMin, forKey: Self.exerciseWrittenKey)
+            return 0
+        }
+        do {
+            let type = HKQuantityType(.appleExerciseTime)
+            let qty = HKQuantity(unit: .minute(), doubleValue: pendingMin)
+            // Tag as estimated so Health readers know this came from a basic HR threshold,
+            // NOT the ring's native activity-intensity sensor data (#93).
+            let sample = HKQuantitySample(type: type, quantity: qty, start: today, end: now,
+                                          metadata: [Self.exerciseEstimateMetadataKey: true])
+            try await store.save(sample)
+            defaults.set(today.timeIntervalSince1970, forKey: Self.exerciseDayKey)
+            defaults.set(totalMin, forKey: Self.exerciseWrittenKey)
+            return pendingMin
+        } catch { return 0 }
     }
 
     /// Write a night as contiguous sleepAnalysis category samples (mapping notes).

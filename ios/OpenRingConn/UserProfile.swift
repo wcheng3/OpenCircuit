@@ -21,6 +21,14 @@ struct UserProfileSettingsView: View {
     @AppStorage(SleepScheduleDefaults.wakeMinutes)
     private var wakeMinutes = SleepScheduleDefaults.defaultWakeMinutes
 
+    // Daily goals (#77). Keys/defaults shared with GoalsCardView via `GoalDefaults`.
+    @AppStorage(GoalDefaults.workdaySteps)    private var workdaySteps    = GoalDefaults.defaultWorkdaySteps
+    @AppStorage(GoalDefaults.weekendSteps)    private var weekendSteps    = GoalDefaults.defaultWeekendSteps
+    @AppStorage(GoalDefaults.activeKcal)      private var activeKcalGoal  = GoalDefaults.defaultActiveKcal
+    @AppStorage(GoalDefaults.activityMinutes) private var actMinGoal      = GoalDefaults.defaultActivityMinutes
+    @AppStorage(GoalDefaults.workdaySleepMin) private var workdaySleepMin = GoalDefaults.defaultWorkdaySleepMin
+    @AppStorage(GoalDefaults.weekendSleepMin) private var weekendSleepMin = GoalDefaults.defaultWeekendSleepMin
+
     // Health-alert thresholds (#73) + skin-temp/fever toggle (#85) + the shared quiet-hours (DND)
     // window. Keys/defaults shared with the notification engine via `HealthAlertDefaults`.
     @AppStorage(HealthAlertDefaults.highHREnabled) private var highHREnabled = true
@@ -90,6 +98,29 @@ struct UserProfileSettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            Section("Daily goals") {
+                Stepper(value: $workdaySteps, in: 1_000...30_000, step: 500) {
+                    LabeledContent("Weekday steps", value: workdaySteps.formatted())
+                }
+                Stepper(value: $weekendSteps, in: 1_000...30_000, step: 500) {
+                    LabeledContent("Weekend steps", value: weekendSteps.formatted())
+                }
+                Stepper(value: $activeKcalGoal, in: 50...1_500, step: 25) {
+                    LabeledContent("Active calories", value: "\(Int(activeKcalGoal)) kcal")
+                }
+                Stepper(value: $actMinGoal, in: 5...180, step: 5) {
+                    LabeledContent("Activity minutes", value: "\(Int(actMinGoal)) min")
+                }
+                Stepper(value: $workdaySleepMin, in: 240...600, step: 15) {
+                    LabeledContent("Weekday sleep", value: formatGoalSleep(workdaySleepMin))
+                }
+                Stepper(value: $weekendSleepMin, in: 240...600, step: 15) {
+                    LabeledContent("Weekend sleep", value: formatGoalSleep(weekendSleepMin))
+                }
+                Text("Progress rings on the dashboard show today's goal vs. actual. Activity minutes = elevated-HR minutes (basic threshold estimate).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("Health alerts") {
                 Toggle("High heart rate", isOn: $highHREnabled)
                 if highHREnabled {
@@ -134,6 +165,13 @@ struct UserProfileSettingsView: View {
 
         }
         .navigationTitle("User Profile")
+    }
+
+    // MARK: Goal helpers
+
+    private func formatGoalSleep(_ minutes: Int) -> String {
+        let h = minutes / 60, m = minutes % 60
+        return m > 0 ? "\(h)h \(m)m" : "\(h)h"
     }
 
     // MARK: Imperial display over metric storage

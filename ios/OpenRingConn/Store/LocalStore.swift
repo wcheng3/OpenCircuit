@@ -658,6 +658,15 @@ struct LocalStore {
         return try context.fetch(descriptor).first
     }
 
+    /// Trailing daily rollups (latest first), bounded by `limit`. Used by TrendsView (#74) to
+    /// build 7-day rolling aggregates for steps. Bounded so it never scans the whole table.
+    func recentDailies(limit: Int = 14) throws -> [StoredDaily] {
+        var descriptor = FetchDescriptor<StoredDaily>(
+            sortBy: [SortDescriptor(\.day, order: .reverse)])
+        descriptor.fetchLimit = limit
+        return try context.fetch(descriptor)
+    }
+
     private func upsertCursor(kind: String, last: Date) {
         let descriptor = FetchDescriptor<StoredCursor>(
             predicate: #Predicate { $0.kindRaw == kind })
