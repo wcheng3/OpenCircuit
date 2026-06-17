@@ -364,6 +364,17 @@ struct LocalStore {
         return try context.fetch(descriptor).compactMap(\.sample)
     }
 
+    /// Stored samples of one kind newer than `since`, oldest→newest. Bounded by the predicate so
+    /// it never scans all history — used by the health-alert engine (#73/#85) to evaluate recent
+    /// HR/SpO2 readings against the user's thresholds.
+    func recentSamples(kind: MetricKind, since: Date) throws -> [QuantitySample] {
+        let kindRaw = kind.rawValue
+        let descriptor = FetchDescriptor<StoredSample>(
+            predicate: #Predicate { $0.kindRaw == kindRaw && $0.start >= since && $0.value > 0 },
+            sortBy: [SortDescriptor(\.start, order: .forward)])
+        return try context.fetch(descriptor).compactMap(\.sample)
+    }
+
     func latestSample(kind: MetricKind) throws -> QuantitySample? {
         let kindRaw = kind.rawValue
         var descriptor = FetchDescriptor<StoredSample>(

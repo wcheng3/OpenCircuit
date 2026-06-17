@@ -40,6 +40,7 @@ struct ContentView: View {
                 VStack(spacing: 16) {
                     connectionCard
                     vitalsCard
+                    vitalsStatusCard
                     sleepCard
                     caloriesCard
                     syncCard
@@ -95,6 +96,7 @@ struct ContentView: View {
                 if syncing == false {
                     recordForegroundSync()
                     flushHealth()
+                    evaluateHealthAlerts()   // #73/#85: a fresh sync may cross a threshold
                 }
             }
             .onChange(of: session?.monitoring) { _, monitoring in
@@ -163,6 +165,16 @@ struct ContentView: View {
         if authorized { observability.markHealthEverAuthorized() }
         let battery = session?.batteryPercent
         Task { await LocalAlertCenter().evaluate(batteryPercent: battery, healthAuthorized: authorized) }
+        evaluateHealthAlerts()
+    }
+
+    /// Evaluate the user's body-vital alert rules (#73 high-HR / low-SpO2 / elevated-HR-while-inactive
+    /// and #85 skin-temp / fever) against the latest stored + just-synced readings, posting any that
+    /// cross a threshold through the ONE shared notification engine (quiet hours + anti-spam backoff).
+    private func evaluateHealthAlerts() {
+        let store = LocalStore(modelContext)
+        let s = session
+        Task { await HealthNotificationCenter().evaluate(store: store, session: s) }
     }
 
     // MARK: Connection
@@ -335,6 +347,11 @@ struct ContentView: View {
             VitalsTableView(session: session)
         }
     }
+
+    /// Vitals Status (#72): compares the latest day's resting HR / overnight SpO₂ / overnight HRV /
+    /// skin temp to the user's PERSONAL 7–30 day baseline and surfaces normal / watch / anomaly with
+    /// the contributing signals (incl. suspected fever). Self-contained view (its own @Query).
+    private var vitalsStatusCard: some View { VitalsStatusCardView() }
 
     /// Dedicated, always-visible sleep section below vitals. Reads the persisted nightly summary
     /// so the most recent night stays on screen all day — across reconnects and syncs — and

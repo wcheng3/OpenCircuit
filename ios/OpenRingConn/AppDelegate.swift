@@ -70,6 +70,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 observability.recordSyncOutcome(kind: kind, success: synced,
                                                 detail: synced ? "captured/flushed data" : "no data this run")
                 await Self.evaluateAlerts()
+                // Body-vital alerts (#73/#85) from the freshly-synced store — battery/session are
+                // gone in the background, so this reads persisted samples only (session: nil).
+                await HealthNotificationCenter().evaluate(store: LocalStore(container.mainContext),
+                                                          session: nil)
                 scheduler.schedule()
                 scheduler.scheduleProcessing()
                 task.setTaskCompleted(success: synced)

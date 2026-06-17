@@ -21,6 +21,19 @@ struct UserProfileSettingsView: View {
     @AppStorage(SleepScheduleDefaults.wakeMinutes)
     private var wakeMinutes = SleepScheduleDefaults.defaultWakeMinutes
 
+    // Health-alert thresholds (#73) + skin-temp/fever toggle (#85) + the shared quiet-hours (DND)
+    // window. Keys/defaults shared with the notification engine via `HealthAlertDefaults`.
+    @AppStorage(HealthAlertDefaults.highHREnabled) private var highHREnabled = true
+    @AppStorage(HealthAlertDefaults.highHRBpm) private var highHRBpm = HealthAlertDefaults.defaultHighHRBpm
+    @AppStorage(HealthAlertDefaults.lowSpO2Enabled) private var lowSpO2Enabled = true
+    @AppStorage(HealthAlertDefaults.lowSpO2Percent) private var lowSpO2Percent = HealthAlertDefaults.defaultLowSpO2Percent
+    @AppStorage(HealthAlertDefaults.elevatedHREnabled) private var elevatedHREnabled = true
+    @AppStorage(HealthAlertDefaults.elevatedHRBpm) private var elevatedHRBpm = HealthAlertDefaults.defaultElevatedHRBpm
+    @AppStorage(HealthAlertDefaults.tempFeverEnabled) private var tempFeverEnabled = true
+    @AppStorage(HealthAlertDefaults.quietEnabled) private var quietEnabled = false
+    @AppStorage(HealthAlertDefaults.quietStartMinutes) private var quietStart = HealthAlertDefaults.defaultQuietStart
+    @AppStorage(HealthAlertDefaults.quietEndMinutes) private var quietEnd = HealthAlertDefaults.defaultQuietEnd
+
     var body: some View {
         Form {
             Section("Profile") {
@@ -74,6 +87,48 @@ struct UserProfileSettingsView: View {
                 }
                 Text("Bounds the overnight skin-temp window. When Apple Health is "
                      + "authorized, your iOS Sleep schedule is used instead.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Health alerts") {
+                Toggle("High heart rate", isOn: $highHREnabled)
+                if highHREnabled {
+                    Stepper(value: $highHRBpm, in: 80...200, step: 5) {
+                        LabeledContent("Notify above", value: "\(highHRBpm) bpm")
+                    }
+                }
+                Toggle("Low blood oxygen", isOn: $lowSpO2Enabled)
+                if lowSpO2Enabled {
+                    Stepper(value: $lowSpO2Percent, in: 80...99) {
+                        LabeledContent("Notify below", value: "\(lowSpO2Percent)%")
+                    }
+                }
+                Toggle("Elevated HR while inactive", isOn: $elevatedHREnabled)
+                if elevatedHREnabled {
+                    Stepper(value: $elevatedHRBpm, in: 80...160, step: 5) {
+                        LabeledContent("Sustained above", value: "\(elevatedHRBpm) bpm")
+                    }
+                    Text("Notifies if heart rate stays above this for 10 minutes while inactive. "
+                         + "Sharpens once activity detection lands.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Toggle("Skin-temp & fever alerts", isOn: $tempFeverEnabled)
+                Text("Note: OpenRingConn is not a medical device. These reminders are based on ring "
+                     + "sensor data only and are not a diagnosis. If you feel unwell, consult a "
+                     + "qualified medical professional.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+
+            Section("Quiet hours") {
+                Toggle("Mute alerts overnight", isOn: $quietEnabled)
+                if quietEnabled {
+                    DatePicker("From", selection: timeBinding($quietStart),
+                               displayedComponents: .hourAndMinute)
+                    DatePicker("To", selection: timeBinding($quietEnd),
+                               displayedComponents: .hourAndMinute)
+                }
+                Text("Health alerts are held during this window (delivered once it ends if still "
+                     + "relevant).")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
