@@ -2,6 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.dreamality.openringconn.bgrefresh</string>
+		<string>com.dreamality.openringconn.bgprocessing</string>
+	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleExecutable</key>
@@ -24,9 +29,13 @@
 	<string>OpenRingConn reads health metrics from your RingConn ring to display them.</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>OpenRingConn writes your ring's metrics into Apple Health.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>OpenRingConn uses your location to map outdoor workout routes (walking, running, cycling, hiking). Location is not used outside of an active workout.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
+		<string>fetch</string>
+		<string>processing</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
