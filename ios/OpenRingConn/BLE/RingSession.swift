@@ -73,6 +73,19 @@ final class RingSession: NSObject {
     /// UI can show a subtle "auto-updating" cue instead of reading as a user measurement.
     private(set) var autoMeasuring = false
 
+    // MARK: User measure UX (#55)
+
+    /// True while the user has manually tapped "Measure" for a live HR or SpO₂ reading
+    /// (as opposed to the periodic `autoMeasuring`). Lets the poll loop enforce a per-mode
+    /// timeout and the UI distinguish Preparing → Measuring → failure states.
+    private(set) var userMeasuring = false
+    /// Set when a user-initiated measure times out without locking a reading. Cleared the
+    /// next time the user taps Measure so a retry dismisses the error naturally. Not cleared
+    /// on stop or disconnect — the banner persists until the user acts on it.
+    private(set) var userMeasureFailed = false
+    /// Actionable guidance copy surfaced when `userMeasureFailed` is true.
+    private(set) var userMeasureFailedMessage: String? = nil
+
     /// True when frames have stopped for long enough that the live readings (HR/SpO₂/battery/
     /// steps/temp) should read as STALE rather than current (#36). A silently-dropped link keeps
     /// its last values until CoreBluetooth eventually fires `didDisconnect`; this lets the UI
@@ -180,6 +193,7 @@ final class RingSession: NSObject {
         livePreparing = false
         syncing = false
         autoMeasuring = false
+        userMeasuring = false
         // Stop CoreBluetooth callbacks routing to a torn-down session. Only clear the delegate if
         // it's still us — a newer session for the same peripheral reassigns it in its own `init`,
         // and we must not clobber that.
@@ -284,12 +298,35 @@ final class RingSession: NSObject {
             //    then polls ~every 2 s, request/response. (SpO2's byte[14] survives fast
             //    polling, which is why only HR got stuck.) No `d0` here — it re-arms the
             //    mode switch and also kicks HR back to warm-up.
+            // User-measure deadline: a hand-started read gets a per-mode budget (HR 90 s,
+            // SpO₂ 45 s). On expiry without a lock, surface `userMeasureFailed` so the UI
+            // shows actionable guidance rather than spinning forever. The auto-measure path
+            // is already bounded by `autoMeasureOnce`'s own outer deadline — the poll loop
+            // there can be unbounded (the task is cancelled externally when it fires). (#55)
+            let isUserMeasure = self?.userMeasuring ?? false
+            let pollDeadline: Date? = isUserMeasure
+                ? Date().addingTimeInterval((self?.liveMode == .spo2) ? 45 : 90)
+                : nil
             try? await Task.sleep(for: .seconds(2))   // let the ring settle before first poll
             while !Task.isCancelled {
                 guard let self else { return }
                 self.write(Command.poll)
+                // Check the user-measure budget on each iteration (auto path: pollDeadline is nil).
+                if let deadline = pollDeadline, Date() >= deadline {
+                    let locked = self.liveMode == .hr ? self.liveHR != nil : self.liveSpO2 != nil
+                    if !locked {
+                        self.userMeasureFailed = true
+                        self.userMeasureFailedMessage = "Couldn't get a reading — make sure the ring is worn snugly and not on the charger, then hold still."
+                        let modeStr = self.liveMode == .hr ? "hr" : "spo2"
+                        ringLog.notice("user measure: timeout, no lock (mode=\(modeStr, privacy: .public)) → userMeasureFailed (#55)")
+                    }
+                    break
+                }
                 try? await Task.sleep(for: .seconds(2))
             }
+            // Clean teardown after a user-measure timeout: stop monitoring, persist last value,
+            // and let ContentView's `.onChange(session?.monitoring)` flush to Health.
+            if let self, self.userMeasureFailed { self.stopLiveMonitoring() }
         }
     }
 
@@ -537,6 +574,12 @@ final class RingSession: NSObject {
             }
         } else {
             liveMode = mode
+            // User-initiated: arm the timeout UX state so the poll loop can self-terminate (#55).
+            if userInitiated {
+                userMeasuring = true
+                userMeasureFailed = false
+                userMeasureFailedMessage = nil
+            }
             startLiveMonitoring(quickLiveRead: quickLiveRead, clearStaleValue: userInitiated)
         }
     }
@@ -550,6 +593,8 @@ final class RingSession: NSObject {
         liveHR = nil
         liveHRTrend.removeAll()
         liveHRWarmup = nil
+        userMeasureFailed = false        // retry: dismiss the prior error naturally (#55)
+        userMeasureFailedMessage = nil
         let modeCmd = liveMode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
         Task { [weak self] in
             guard let self else { return }
@@ -569,6 +614,8 @@ final class RingSession: NSObject {
         liveMode = mode
         liveHRTrend.removeAll()   // restarting the HR window
         liveHRWarmup = nil
+        userMeasureFailed = false   // mode switch = fresh start, dismiss any prior failure (#55)
+        userMeasureFailedMessage = nil
         guard monitoring else { return }
         let modeCmd = mode == .hr ? Command.liveHRMode : Command.liveSpO2Mode
         // Re-arm with the d0 status query before the mode byte (mirrors the proven enter
@@ -590,6 +637,7 @@ final class RingSession: NSObject {
         monitorTask = nil
         monitoring = false
         livePreparing = false
+        userMeasuring = false   // user read done (or timed out — `userMeasureFailed` is kept for the banner) (#55)
         // Safety net for a background teardown that interrupted the live-enter drain before its
         // post-drain commit ran (#22 bg race): persist the captured pages so an overnight read
         // that never reached its finalize doesn't silently drop last night's sleep/vitals.

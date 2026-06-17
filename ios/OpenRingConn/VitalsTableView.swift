@@ -131,11 +131,13 @@ struct VitalsTableView: View {
         VStack(alignment: .leading, spacing: 0) {
             measurableRow("Heart Rate", value: hrText, mode: .hr, active: hrActive,
                           time: hrActive && session?.liveHR == nil
-                              ? "measuring…" : timeFor(.heartRate, live: hrLive))
+                              ? (session?.livePreparing == true ? "preparing…" : "measuring…")
+                              : timeFor(.heartRate, live: hrLive))
             divider
             measurableRow("SpO₂", value: spo2Text, mode: .spo2, active: spo2Active,
                           time: spo2Active && session?.liveSpO2 == nil
-                              ? "measuring…" : timeFor(.spo2, live: spo2Live))
+                              ? (session?.livePreparing == true ? "preparing…" : "measuring…")
+                              : timeFor(.spo2, live: spo2Live))
             divider
             skinTempRow
             divider

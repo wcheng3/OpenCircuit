@@ -180,11 +180,14 @@ struct ContentView: View {
                 } else if session?.autoMeasuring == true {
                     ProgressView().controlSize(.small)
                     Text("Auto-measuring…").font(.caption).foregroundStyle(.secondary)
-                } else if hrMeasuring {
-                    // A user HR measure that's converging but hasn't locked — show warm-up
-                    // progress so a fresh Measure reads as "still climbing", not dead/stale (#45 C).
+                } else if session?.userMeasuring == true, session?.livePreparing == true {
+                    // User-initiated: draining the history backlog before live mode starts (#55).
                     ProgressView().controlSize(.small)
-                    Text(hrWarmupText).font(.caption).foregroundStyle(.secondary)
+                    Text("Preparing…").font(.caption).foregroundStyle(.secondary)
+                } else if userMeasureInProgress {
+                    // Polling — sensor warming up; no raw byte shown (#55).
+                    ProgressView().controlSize(.small)
+                    Text(measureStatusText).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 // Ring battery (a device stat, not a body vital) sits with the connection. When
@@ -207,6 +210,9 @@ struct ContentView: View {
             // un-activated/un-bonded signature. Until the activate step is reverse-engineered, the
             // only fix is to open the official app once; say so instead of spinning forever.
             if connected, session?.notStreaming == true { activationHint }
+            // User-initiated measure timed out without locking a reading. Persists until the
+            // user taps Measure again (which clears it naturally). (#55)
+            if session?.userMeasureFailed == true { measureFailedHint }
             if !connected {
                 Button {
                     scanner.start()
@@ -235,16 +241,42 @@ struct ContentView: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
     }
 
-    /// A user (non-auto) HR measurement that's converging but hasn't locked yet (#45 C). The
-    /// auto-measure branch above takes precedence, so this only lights up for a hand-started read.
-    private var hrMeasuring: Bool {
-        session?.monitoring == true && session?.liveMode == .hr && session?.liveHR == nil
+    /// A user (non-auto) measurement that's converging but hasn't locked yet — covers both HR
+    /// and SpO₂ modes. Only true AFTER the preparing (drain) phase so "Preparing…" and
+    /// "Measuring…" are distinct states in the connection-card header. (#55)
+    private var userMeasureInProgress: Bool {
+        session?.userMeasuring == true
+            && session?.monitoring == true
+            && session?.livePreparing == false
+            && (session?.liveMode == .hr ? session?.liveHR == nil : session?.liveSpO2 == nil)
     }
-    /// Warm-up label: surfaces the climbing raw HR byte when present (proves frames are arriving
-    /// and the sensor is warming up vs. no contact), else a plain measuring note.
-    private var hrWarmupText: String {
-        if let w = session?.liveHRWarmup { return "Warming up HR… (\(w))" }
-        return "Measuring HR…"
+    /// Status copy for the polling phase of a user-initiated measure. No raw byte shown —
+    /// the warmup byte value is a low-level sentinel that reads as noise to the user. Instead,
+    /// "Hold still" when frames are arriving (liveHRWarmup != nil) proves contact without
+    /// exposing internals; a plain "Measuring" covers SpO₂ and the no-frame case. (#55)
+    private var measureStatusText: String {
+        if session?.liveMode == .hr {
+            if session?.liveHRWarmup != nil { return "Hold still — getting a reading" }
+            return "Measuring heart rate…"
+        }
+        return "Measuring SpO₂…"
+    }
+    /// Inline failure banner: shown when a user-initiated measure timed out without a lock.
+    /// Styled like `activationHint` (orange, inside the connection card) for visual consistency.
+    /// Dismissed naturally when the user taps Measure again. (#55)
+    private var measureFailedHint: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Reading timed out").font(.subheadline.weight(.medium))
+                Text(session?.userMeasureFailedMessage
+                     ?? "Couldn't get a reading — make sure the ring is worn snugly and not on the charger, then hold still.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
     }
 
     /// "as of Xm ago" for the connection-header battery, shown only once the link has gone quiet
