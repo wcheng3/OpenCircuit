@@ -29,6 +29,8 @@
 	<string>OpenRingConn reads health metrics from your RingConn ring to display them.</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>OpenRingConn writes your ring's metrics into Apple Health.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>OpenRingConn uses your location to map outdoor workout routes (walking, running, cycling, hiking). Location is not used outside of an active workout.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>

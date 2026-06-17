@@ -27,6 +27,9 @@ targets:
         NSHealthUpdateUsageDescription: "OpenRingConn writes your ring's metrics into Apple Health."
         # BLE (Phase 3) — required to connect to the ring.
         NSBluetoothAlwaysUsageDescription: "OpenRingConn connects to your RingConn ring over Bluetooth Low Energy."
+        # Location (Phase 3, #75) — used ONLY when recording an outdoor workout to map the
+        # GPS route on the phone side (the ring has no GPS). Not used at any other time.
+        NSLocationWhenInUseUsageDescription: "OpenRingConn uses your location to map outdoor workout routes (walking, running, cycling, hiking). Location is not used outside of an active workout."
         # Background sync while suspended (docs/HANDOFF_MACOS_IOS.md). `processing` enables the
         # BGProcessingTask (longer runtime) so the optical-HR poll can clear its ~60 s warm-up in
         # the background (#45/#50 follow-up). iOS still runs it at its discretion, so this is

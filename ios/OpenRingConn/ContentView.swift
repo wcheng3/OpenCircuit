@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var healthAuthorized = false
     @State private var lastWrite: String?
     @State private var showDebug = false
+    @State private var showWorkout = false
 
     /// Freshness timestamps mirrored from the UserDefaults-backed observability store (#44).
     /// Held in @State because UserDefaults writes (from the background task / a flush) don't
@@ -44,6 +45,7 @@ struct ContentView: View {
                     sleepCard
                     caloriesCard
                     card { GoalsCardView() }
+                    workoutCard
                     trendsNavigationCard
                     syncCard
                     debugCard
@@ -360,6 +362,31 @@ struct ContentView: View {
     /// reflects a just-finished sync instantly via the live staged segments. (See SleepCardView.)
     private var sleepCard: some View {
         SleepCardView(liveSegments: session?.stagedSegments ?? [])
+    }
+
+    /// Workout session card — taps through to WorkoutView (#75).
+    /// Displays a start-workout prompt; tapping opens the sport-picker sheet.
+    private var workoutCard: some View {
+        Button {
+            showWorkout = true
+        } label: {
+            card {
+                HStack(spacing: 8) {
+                    Image(systemName: "figure.run").foregroundStyle(.blue)
+                    Text("WORKOUT")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+                Text("Record a workout with HR zones + GPS route (outdoor)")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showWorkout) {
+            WorkoutView(session: session)
+        }
     }
 
     /// 7-day trends nav card — taps through to the full TrendsView (#74).

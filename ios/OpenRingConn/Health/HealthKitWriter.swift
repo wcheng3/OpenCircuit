@@ -71,6 +71,9 @@ final class HealthKitWriter {
         }
         set.insert(HKQuantityType(.basalEnergyBurned))
         set.insert(HKCategoryType(.sleepAnalysis))
+        // Workout types (#75): HKWorkout + GPS route (workout sessions feature).
+        set.insert(HKWorkoutType.workoutType())
+        set.insert(HKSeriesType.workoutRoute())
         return set
     }
 
