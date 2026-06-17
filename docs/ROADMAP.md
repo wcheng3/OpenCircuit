@@ -26,8 +26,10 @@ Validate the spec cheaply before committing to Swift.
 - [x] Port the validated **framing codec** to Swift — `ios/OpenRingKit` SwiftPM
       package (`Frame`, `Opcode`, `LiveHR`), tested against real FR02.018 capture
       frames. Builds/tests without Xcode via `swift run RingKitVerify`.
-- [ ] Port **per-metric parsers** (blocked: needs decoded metric formats — sleep/
-      SpO2/HRV/steps/temp captures are 🔴 in PROTOCOL.md §5).
+- [x] Port **sleep-vitals parser** — `OpenRingKit/BulkSleep.swift` decodes `0x4c`
+      history pages → HR/HRV/SpO2 per-epoch `QuantitySample`s (PROTOCOL.md §5.3 🟢,
+      app-confirmed). Tested against real 2026-06-13 sync frames. Steps/temp/RR parsers
+      still pending their formats (🟡/🔴).
 - [x] **Xcode app target** — `ios/project.yml` (XcodeGen) generates `OpenRingConn`
       (bundle `com.openringconn.app`, iOS 17, embeds OpenRingKit, HealthKit + BLE
       Info.plist keys + `bluetooth-central` background mode). **Compiles** for the
@@ -35,13 +37,18 @@ Validate the spec cheaply before committing to Swift.
 - [x] **CoreBluetooth glue** — `BLE/RingScanner.swift` (scan by confirmed name
       prefix, connect) + `RingSession.swift` (discover notify/write chars by UUID,
       enable notify, poll live HR via OpenRingKit.Frame, decode 0x15 frames).
+      `syncHistory()` drains `0x4c` pages → `BulkSleep` → HR/HRV/SpO2 samples,
+      finalized on `0x50` end-of-history; ContentView writes them to HealthKit.
 - [x] **HealthKitWriter** — auth + per-type write/units per HEALTHKIT_MAPPING.md.
 - [x] **Metric models + SyncCursor** — `Metrics.swift` + `SyncCursor.swift`, tested.
 - [x] **LocalStore (SwiftData)** — StoredSample/StoredCursor wrapping SyncCursor.
 - [x] **XCTest suite** runs under Xcode: 23 tests, 0 failures.
 - [ ] Port **per-metric parsers** (blocked: metric formats 🔴 in PROTOCOL.md §5).
-- [ ] Run on a real device + ring (BLE needs hardware; simulator can't connect).
-**Exit:** iOS app pulls the same data the desktop client does.
+- [x] Run on a real device + ring — **the app pulls live data from the ring** (live HR
+      decoded 68 bpm; history sync runs) once the iPhone is **bonded** to the ring (pair
+      via the official app once; BLE bonds are shared across apps — PROTOCOL.md §0).
+**Exit:** ✅ **MET** — iOS app pulls the same live HR / history the desktop decodes.
+Remaining for end-to-end into Apple Health: the paid-account HealthKit entitlement (Phase 4).
 
 > **Blocked on hardware/decisions (hard stops):** (a) notify/write **characteristic
 > UUIDs are still 🟡** — `openringconn scan` must bind them to the confirmed handles
@@ -51,9 +58,20 @@ Validate the spec cheaply before committing to Swift.
 > sync is not.
 
 ## Phase 4 — HealthKit write
-- [ ] Map each metric per `HEALTHKIT_MAPPING.md`; request authorizations.
-- [ ] Write live + historical samples with device timestamps; dedup on re-sync.
-- [ ] Backfill on first run, incremental thereafter.
+- [x] Map each metric per `HEALTHKIT_MAPPING.md`; request authorizations
+      (`HealthKitWriter` per-type units + auth; sleep as `sleepAnalysis` category).
+- [x] Write historical samples with device timestamps; **dedup on re-sync** —
+      sync → `LocalStore.ingest` (cursor-based `selectNew`) + `ingestSleep` (gated on
+      the `.sleep` cursor) → only NEW samples/segments reach HealthKit (ContentView).
+- [x] Backfill on first run, incremental thereafter — the per-metric cursor makes the
+      first sync write everything and later syncs write only newer records.
+> Dedup *logic* is unit-tested via `SyncCursor`; the `LocalStore` SwiftData wrapper is
+> build-verified only (no app-target test target yet). Live-HR samples aren't persisted
+> (only history sync routes through the store). Functional run needs device + ring.
+> **The only blocker to actually writing Health is the HealthKit entitlement, which needs
+> a paid Apple Developer account.** On a paid team, uncomment the `entitlements:` block in
+> `ios/project.yml`, `xcodegen generate`, and pick your team (see HANDOFF). Do NOT set the
+> entitlement on a free team — it breaks device launch (pre-main libxpc crash).
 **Exit:** ring metrics appear in Apple Health, no cloud involved.
 
 ## Phase 5 — Analytics (port from openwhoop)
@@ -61,13 +79,22 @@ Validate the spec cheaply before committing to Swift.
       and **sleep score** to Swift in `OpenRingKit/Analytics/`, with tests mirroring
       openwhoop's own Rust vectors (exact calibration anchors match: strain 21.0 at
       24h@maxHR, stress 10.0 at constant RR).
-- [x] Port **sleep-cycle detection** (activity.rs: gravity-vector stillness →
-      Sleep/Active periods, `findSleep`) to `Analytics/SleepDetection.swift`, with
-      tests mirroring openwhoop's. ⚠️ needs a per-reading **gravity vector** — the
-      ring's IMU stream is 🔴 (likely the 0x47/0x4c bulk frames), so it's algorithm-
-      ready but not yet wired to real data.
-- [ ] Wire analytics to real decoded metrics (blocked: RR-interval availability &
-      sample cadence are 🔴 in PROTOCOL.md §5 — needs a capture).
+- [x] Port **sleep-cycle detection** (activity.rs: stillness → Sleep/Active periods,
+      `findSleep`) to `Analytics/SleepDetection.swift`, with tests mirroring openwhoop's.
+- [x] **Wire sleep detection to real data** — `detectFromMotion` feeds the decoded
+      `0x4c [10:15]` motion channel (no gravity vector needed) into the same core;
+      `BulkSleep.sleepSegments` → `inBed`/`asleepCore`/`awake` for HealthKit, surfaced in
+      RingSession + ContentView. Validated on the 2026-06-13 night: detects in-bed
+      00:33→09:34 vs the app's ~00:32→09:30.
+- [~] **Experimental Deep/REM staging** — `BulkSleep.stagedSegments` (HR-percentile
+      heuristic: Awake=motion, Deep=HR≤p20, REM=HR≥p70, else Light, ≥5-min runs).
+      Matches the night's stage TOTALS to ~13% (Deep 100 vs 90, REM 142 vs 115, Light
+      222 vs 242, Awake 8 vs 13 min) but **NOT the architecture** (put Deep late / REM
+      early — HR alone can't place cycles, and the deepest HR fell before sleep-onset).
+      Shown in-app as "experimental"; **only the coarse segments are written to
+      HealthKit**. A faithful hypnogram needs richer signal / per-epoch ground truth.
+- [ ] Wire **HRV/stress/strain** to real metrics (still gated: those assume per-beat
+      RR intervals; the ring sends per-epoch HRV(ms)/HR, not RR — see note below).
 - [ ] Write derived metrics to HealthKit / app UI (Phase 4 dependency).
 
 > ⚠️ The ported analytics assume per-beat **RR intervals** and ~1 Hz HR (Whoop's
