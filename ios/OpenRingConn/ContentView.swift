@@ -13,6 +13,16 @@ struct ContentView: View {
     /// Women's health feature gate (#78). Matches the key in UserProfileSettingsView.
     @AppStorage("userProfile.womensHealthEnabled") private var womensHealthEnabled = false
 
+    /// Persisted user ordering of the reorderable dashboard sections (long-press-drag QoL). Stored
+    /// as a comma-joined list of `DashboardSection.rawValue`; unknown/duplicate entries are ignored
+    /// and any newly-added sections are appended in canonical order, so a saved order survives app
+    /// updates. See `sectionOrder` / `moveSection`.
+    @AppStorage("dashboard.sectionOrder") private var sectionOrderRaw = ""
+    /// Typed navigation-stack path. Reorderable cards push by appending a `Route` instead of
+    /// wrapping in a `NavigationLink`, so the enclosing `List` doesn't draw its own row chevron on
+    /// top of each card's custom one.
+    @State private var path: [Route] = []
+
     /// Freshness timestamps mirrored from the UserDefaults-backed observability store (#44).
     /// Held in @State because UserDefaults writes (from the background task / a flush) don't
     /// publish to SwiftUI — we re-read them on the lifecycle hooks below.
@@ -41,26 +51,34 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
+        NavigationStack(path: $path) {
+            // A List (not a ScrollView) so the middle cards can be long-press-dragged to reorder
+            // via `.onMove`. The connection card (ring name + battery) is pinned at the top and the
+            // device-info + debug cards are pinned at the bottom — only the sections in between are
+            // user-orderable (QoL). Row chrome is stripped so each card keeps its own styling, and
+            // the list background defers to the grouped background like the old ScrollView did.
+            List {
+                Group {
                     connectionCard
-                    vitalsCard
-                    vitalsStatusCard
-                    sleepCard
-                    caloriesCard
-                    card { GoalsCardView() }
-                    workoutCard
-                    if womensHealthEnabled { cycleCalendarCard }
-                    trendsNavigationCard
-                    syncCard
+                    ForEach(visibleSections) { section in
+                        sectionView(section)
+                    }
+                    .onMove(perform: moveSection)
                     deviceInfoCard
                     debugCard
                 }
-                .padding()
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .background(Color(.systemGroupedBackground))
+            // Pull-to-refresh: swipe down to force a history sync, mirroring the "Sync from ring"
+            // button. The control stays up until the bounded sync settles (QoL). See `forceSync`.
+            .refreshable { await forceSync() }
             .navigationTitle("OpenRingConn")
+            .navigationDestination(for: Route.self) { route in destination(for: route) }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink {
@@ -125,6 +143,105 @@ struct ContentView: View {
                 }
                 if pct < 100 { batteryWasFull = false }
             }
+        }
+    }
+
+    // MARK: Dashboard section ordering (long-press to reorder)
+
+    /// The full canonical-or-saved order of reorderable sections. Decodes `sectionOrderRaw`,
+    /// dropping unknown/duplicate ids, then appends any sections not yet present (new features) in
+    /// their canonical `allCases` order — so a saved order keeps working across app updates that
+    /// add cards.
+    private var sectionOrder: [DashboardSection] {
+        var result: [DashboardSection] = []
+        var seen = Set<DashboardSection>()
+        for raw in sectionOrderRaw.split(separator: ",") {
+            if let s = DashboardSection(rawValue: String(raw)), !seen.contains(s) {
+                result.append(s); seen.insert(s)
+            }
+        }
+        for s in DashboardSection.allCases where !seen.contains(s) {
+            result.append(s); seen.insert(s)
+        }
+        return result
+    }
+
+    /// The sections actually rendered right now — `sectionOrder` minus any feature-gated card that's
+    /// switched off (currently just the women's-health cycle calendar).
+    private var visibleSections: [DashboardSection] {
+        sectionOrder.filter { $0 != .cycle || womensHealthEnabled }
+    }
+
+    /// Apply a long-press-drag reorder. The move arrives in `visibleSections` index space; we apply
+    /// it there, then merge any hidden sections back at their prior absolute positions (so turning a
+    /// feature on later restores its card roughly where it was) and persist the result.
+    private func moveSection(from source: IndexSet, to destination: Int) {
+        var visible = visibleSections
+        visible.move(fromOffsets: source, toOffset: destination)
+        var merged = visible
+        for section in sectionOrder where !visible.contains(section) {
+            let idx = min(sectionOrder.firstIndex(of: section) ?? merged.count, merged.count)
+            merged.insert(section, at: idx)
+        }
+        sectionOrderRaw = merged.map(\.rawValue).joined(separator: ",")
+    }
+
+    /// Map a section id to its card view (the body's reorderable middle).
+    @ViewBuilder
+    private func sectionView(_ section: DashboardSection) -> some View {
+        switch section {
+        case .vitals:       vitalsCard
+        case .vitalsStatus: vitalsStatusCard
+        case .sleep:        sleepCard
+        case .calories:     caloriesCard
+        case .goals:        card { GoalsCardView() }
+        case .workout:      workoutCard
+        case .cycle:        cycleCalendarCard
+        case .trends:       trendsNavigationCard
+        case .sync:         syncCard
+        }
+    }
+
+    /// Destination view for a programmatic navigation `Route`.
+    @ViewBuilder
+    private func destination(for route: Route) -> some View {
+        switch route {
+        case .trends:      TrendsView()
+        case .cycle:       CycleCalendarView()
+        case .deviceInfo:  DeviceInfoView(session: session)
+        case .activityLog: ActivityLogView()
+        }
+    }
+
+    // MARK: Pull-to-refresh
+
+    /// Pull-to-refresh handler — mirrors the "Sync from ring" button (same guards), and holds the
+    /// refresh control until the bounded history sync settles so the swipe reads as real work. If a
+    /// ring is saved but not yet connected/ready, it kicks a reconnect + arms the one-shot sync (the
+    /// same path as a foreground activation) instead of doing nothing.
+    @MainActor
+    private func forceSync() async {
+        guard let session, session.ready else {
+            // No live/ready session — try to (re)connect to a saved ring and arm a sync for when
+            // the link comes up (no-op if there's no saved ring).
+            handleForegroundActivation()
+            return
+        }
+        // Respect the Sync button's guards: never fight a live read / #99 probe / in-flight sync,
+        // and a not-streaming ring would sync nothing (#54).
+        guard !session.syncing, !session.monitoring, !session.probing,
+              !session.notStreaming else { return }
+        session.syncHistory()
+        // `syncHistory()` latches `syncing` from inside its own Task, so wait briefly for it to
+        // start, then hold until it finalizes (bounded by syncHistory's 45 s watchdog; the extra
+        // margin just guards a missed flag flip so the spinner can't hang forever).
+        for _ in 0 ..< 20 {            // ~1 s: wait for the sync to latch on
+            if session.syncing { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        for _ in 0 ..< 520 {           // ~52 s cap: hold until the drain finalizes
+            if !session.syncing { break }
+            try? await Task.sleep(for: .milliseconds(100))
         }
     }
 
@@ -449,8 +566,8 @@ struct ContentView: View {
     /// Only rendered when `womensHealthEnabled` (settings toggle). All predictions
     /// are labeled as estimates in the destination view.
     private var cycleCalendarCard: some View {
-        NavigationLink {
-            CycleCalendarView()
+        Button {
+            path.append(.cycle)
         } label: {
             card {
                 HStack(spacing: 8) {
@@ -470,8 +587,8 @@ struct ContentView: View {
 
     /// 7-day trends nav card — taps through to the full TrendsView (#74).
     private var trendsNavigationCard: some View {
-        NavigationLink {
-            TrendsView()
+        Button {
+            path.append(.trends)
         } label: {
             card {
                 HStack(spacing: 8) {
@@ -498,8 +615,8 @@ struct ContentView: View {
     /// Prominent "is this thing actually working?" line (#44): when we last pulled from the ring
     /// and when we last wrote to Apple Health, tapping through to the full background-activity log.
     private var freshnessRow: some View {
-        NavigationLink {
-            ActivityLogView()
+        Button {
+            path.append(.activityLog)
         } label: {
             HStack(spacing: 16) {
                 freshnessStat("Last sync", lastSyncAt)
@@ -595,8 +712,8 @@ struct ContentView: View {
     /// Taps through to the read-only device information screen (FW version / generation /
     /// manufacturer / MAC address). Sits between the sync card and the debug card.
     private var deviceInfoCard: some View {
-        NavigationLink {
-            DeviceInfoView(session: session)
+        Button {
+            path.append(.deviceInfo)
         } label: {
             card {
                 HStack(spacing: 8) {
@@ -749,6 +866,22 @@ struct ContentView: View {
     private var lastInferredCharging: Bool {
         UserDefaults.standard.bool(forKey: "battery.inferredCharging")
     }
+}
+
+/// The reorderable dashboard sections — everything between the pinned connection card at the top and
+/// the pinned device-info/debug cards at the bottom. `rawValue` is the persistence key written to
+/// `dashboard.sectionOrder`, so keep these stable across releases; `allCases` order is the default
+/// (first-run) layout.
+private enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
+    case vitals, vitalsStatus, sleep, calories, goals, workout, cycle, trends, sync
+    var id: String { rawValue }
+}
+
+/// Programmatic navigation targets pushed onto the `NavigationStack` path. Using a typed route (vs a
+/// `NavigationLink` per card) keeps the `List` from drawing its own disclosure chevron on top of the
+/// cards' custom ones.
+private enum Route: Hashable {
+    case trends, cycle, deviceInfo, activityLog
 }
 
 /// Home-page calories card. Headline = today's estimated burn; secondary lines break it
