@@ -302,9 +302,48 @@ sample spacing 🟡; (3) absolute physical units. Evidence/decoders: `desktop/an
 Page: `[0]`=`0x4c` · `[1]`=`00` · **`[2]`=remaining-RECORD countdown** (−6/page) ·
 body = 6×**23-byte records** · `[last]`=XOR. 🟢
 Record (23 B): `[0]`=`0x0c` · `[1:4]`=BE counter **+0x96/rec** (cursor space) 🟢 ·
-`[8]`=subtype tag 🟡 · `[9]`=small int (mostly `0a`) 🟡 · `[10:15]`=**5-channel motion**
-(see below) 🟢 · `[15:22]`=7-B per-epoch physiology payload 🟡 · `[22]`=trailer flags 🟡.
-Idle/unworn template: `[4:7]=05 00 0c 00`, `[9]=0a`, `[10:14]=01×5`, `[15:21]=00×7` 🟢.
+`[4]`=HR · `[5]`=HRV · `[6]`=confidence · `[7]`=RR×8 · `[8]`=SpO2-or-wake-flag ·
+`[9]`=item2p5 · **`[10:20]`=`acti_counts`** (activity blob) · `[20]`=info · `[21:22]`=trailer
+(all per the APK reconciliation below). Idle/unworn template:
+`[4:7]=05 00 0c 00`, `[9]=0a`, `[10:14]=01×5`, `[15:21]=00×7` 🟢.
+
+> **This is the `历史测量响应` ("history MEASUREMENT response") record — NOT the
+> activity record (issue #93 reconciliation, 2026-06-17).** The decompiled app
+> (`pp.txt`, blutter) ships an explicit per-2.5-min offset map whose `utc` field
+> sits at loc `0x3`; our wire counter is at byte `[0:4]` (top byte = the `0x0c`
+> delimiter), so **`wire_index = APK_loc − 3`**. Under that convention the
+> MEASUREMENT map (`utc·pr·hrv·conf·resprate·spo2·item2p5·acti_counts·info`)
+> reproduces **byte-for-byte** the §5.3 fields already ground-truthed to the app's
+> 2026-06-13 night — **five independent fields agree**, which is a second,
+> independent source confirming the HR/HRV/RR/SpO2 decode AND naming the rest:
+>
+> | APK field (`历史测量响应`) | APK loc·len | wire idx | meaning | conf |
+> |---|---|---|---|---|
+> | `utc` | 0x3·4 | `[0:4]` | BE counter / cursor (top byte `0x0c`) | 🟢 |
+> | `pr` | 0x7·1 | `[4]` | **HR (bpm)**; <30 = unmeasured sentinel | 🟢 |
+> | `hrv` | 0x8·1 | `[5]` | **HRV / RMSSD (ms)** | 🟢 |
+> | `conf` | 0x9·1 | `[6]` | **confidence / signal quality** 0..~12 (was "[6] quality? 🟡") | 🟢 |
+> | `resprate` | 0xa·1 | `[7]` | **RR × 8** (÷8 → brpm) | 🟢 |
+> | `spo2` | 0xb·1 | `[8]` | **SpO2 %** asleep; `0x12`/`0x13` = awake-"no SpO2" sentinel | 🟢 |
+> | `item2p5` | 0xc·1 | `[9]` | 2.5-min marker (~`0x0a`) | 🟡 |
+> | `acti_counts` | 0xd·0xa | **`[10:20]`** | **10-B activity-magnitude blob** (motion/intensity) | 🟢 role |
+> | `info` | 0x17·1 | `[20]` | per-epoch flag | 🟡 |
+>
+> The V2 measurement map bit-packs `acti_counts` as **length 7.5** (`info` = 0.5 B),
+> so the exact sub-field boundaries inside `[10:20]` are 🟡 (the old "`[10:15]` =
+> 5× motion" is just its first 5 bytes). Confirmed in data: on worn epochs `[4]`
+> reads as physiological HR (median 53, max 96), while decoding `[4:6]` as the
+> *activity* map's `steps` gives non-monotonic garbage (median ~13600). Reproduce
+> with `desktop/decode_activity.py`.
+
+> **⚠️ Correction to the old `[15:22]` "7-byte activity payload" claim (#93).** Those
+> bytes are simply the **tail of `acti_counts`** (`[15:20]`) + `info` (`[20]`) +
+> trailer (`[21:22]`). They carry a per-epoch **activity-INTENSITY** signal —
+> non-zero iff moving, zero at the idle template — **not** steps / distance /
+> activeSeconds / powerLevel / per-epoch battery / dailyActiveFlag. `decode_activity.py`
+> shows the differential: worn-active epochs `Σacti_counts−5` ranges 1→1254, idle is a
+> flat 0 (walk & steps captures). The genuine activity fields live in a **separate**
+> record (next subsection) that our `byte[6]=0x00` syncs never pull.
 
 **+0x96 counter step = exactly 150 s** (the counter is seconds, §5.6) → **each record
 is a 150 s / 2.5-min epoch.** 🟢 Confirmed by `captures/sleep_sync_btsnoop.log`
@@ -325,8 +364,10 @@ time (no 12 h offset in this capture; bears on §5.6/§6.6). Reassemble + decode
   distinct `byte[6]` sync-open selector for HR (only `0x00`/`0x03` across all captures) — there is no
   separate `HrSync`/`0x0a` stream on the wire; all-day HR is the activity-epoch `[4]` we had been
   discarding (`BulkSleep.heartRate` was gated to sleep-vitals). Resolves the daytime/workout-HR gap
-  (#45/#38). HRV `[5]`/SpO2 stay sleep-vitals-only (motion corrupts them). Activity payload in
-  `[15:22]` still 🟡 (#93). motion in `[10:15]` elevated.
+  (#45/#38). HRV `[5]`/SpO2 stay sleep-vitals-only (motion corrupts them). On these epochs
+  `acti_counts` `[10:20]` is elevated and `[15:20]` is its **intensity tail** — not a separate
+  activity payload (corrected by the #93 reconciliation above; the real steps/activeSeconds
+  record is the uncaptured `历史活动响应` stream in §5.3.1).
 - **Sleep-vitals epoch**: per-epoch vitals in `[4:9]`, motion `[10:15]` at `01` baseline,
   `[15:22]` ≈ zero. `[8]` is the **SpO2 %** (typically `0x57–0x63` = 87–99, but lower on a real
   desaturation). ⚠️ Layout is decided **structurally** (#39), NOT by this band: classify as
@@ -390,9 +431,74 @@ Baseline `01` = "still", not "unworn".
 > matching openwhoop's approach and our Phase 5 plan: compute stages in Swift from these
 > signals, don't expect them on the wire.
 
-> **Status:** HR `[4]`, HRV `[5]`, SpO2 `[8]`, motion `[10:15]` and the 150 s cadence are
-> 🟢 (app-aligned, §6.2). Open: `[6]`/`[7]` semantics, the activity-epoch `[15:22]` payload,
-> and skin temp + RR (not in this capture — see above).
+> **Status:** HR `[4]`, HRV `[5]`, conf `[6]`, RR `[7]`, SpO2 `[8]`, `acti_counts` `[10:20]`
+> and the 150 s cadence are 🟢 (app-aligned §6.2 + APK-map cross-confirmed, #93). Resolved
+> the old "`[6]`/`[7]` semantics, `[15:22]` payload" opens: `[6]`=confidence, `[7]`=RR×8,
+> `[15:22]`=`acti_counts` tail (intensity, not steps). Open: exact `acti_counts` bit-layout
+> `[10:20]` and `item2p5` `[9]`/`info` `[20]`; skin temp + RR-summary (not in this stream).
+
+#### 5.3.1 `历史活动响应` — the per-epoch ACTIVITY record (steps/distance/…) — 🔴 NOT YET CAPTURED (#93)
+The decompiled app has a **second** per-2.5-min offset map, `历史活动响应`
+("history ACTIVITY response"), that carries the step/activity fields #93 wants —
+**steps, deviceState, powerLevel, Temp1-4, item5p0_1..3, activeSeconds,
+dailyActiveFlag** (matches the `HistoryActivitySyncInfo` SQLite table). It is a
+**different record from the `0x4c` measurement record above**, and **it does not
+appear in any capture we have**: a full opcode census of walk/steps/sleep/battery/
+morning/login (`0x10`/`0x47`/`0x4c`/`0x15`/`0x81`/`0x82`/`0x86`/`0x50`/`0x11` only)
+finds no record matching this layout — every worn `0x4c` epoch decodes as a
+measurement record (physiological HR at `[4]`), none as an activity record.
+
+**Why it's missing:** `step`/`stand` are `DataSyncType.ringData` selected by the
+sync-open `byte[6]` (§5.6.1) — but every capture used `byte[6]=0x00`, which returns
+the sleep/measurement+PPG drain. The activity/step stream needs the **step
+selector** (enum-idx 2 → likely `byte[6]=0x02`), the same gap as the all-day
+HR/SpO2 probe (#99). So #93 is **blocked on a capture**, not on decoding.
+
+**Predicted wire layout (via the §5.3-validated `wire_index = APK_loc − 3`)** —
+all 🔴 until a `byte[6]`-activity capture confirms; `decode_activity_record_PREDICTED()`
+in `desktop/decode_activity.py` implements it:
+
+| APK field (`历史活动响应`) | APK loc·len | pred. wire idx | meaning / HealthKit | conf |
+|---|---|---|---|---|
+| `utc` | 0x3·4 | `[0:4]` | BE counter / epoch start | 🟢 (counter is 🟢) |
+| `steps` | 0x7·2 | `[4:6]` LE | **per-epoch steps** → HK `stepCount` history | 🔴 |
+| `DeviceState` | 0x9·1 | `[6]` | wear/charge state enum | 🔴 |
+| `powerLevel` | 0xa·1 | `[7]` | **per-epoch battery %** → battery curve | 🔴 |
+| `Temp1..4` | 0xb/d/f/11·2 | `[8:16]` | 4× per-epoch skin temp (≠ §5.4 live descriptor temp) | 🔴 |
+| `item5p0_1..3` | 0x13/14/15·1 | `[16:19]` | unknown (3 small ints) | 🔴 |
+| `active_seconds` | 0x16·2 | `[19:21]` LE | **active seconds (0..150)/epoch** → HK `AppleExerciseTime` | 🔴 |
+| `dailyActiveFlag` | 0x18·1 | `[21]` | **stand/active flag** → HK `AppleStandHour` | 🔴 |
+
+- **distance is NOT on the wire** — the app computes it `steps × ~0.248 m`
+  (`pp.txt` L102573, `distCal`); reproduce client-side, don't expect a wire field. 🟢
+- **4-level activity intensity** (Inactive/Low/Moderate/Vigorous, one dot per
+  2.5-min, `pp.txt` L45207) is **app-computed from `acti_counts`** — no stored band
+  byte. We CAN derive an intensity proxy now from the measurement record's
+  `acti_counts` `[10:20]` (present); the exact band thresholds are 🔴 (need an app
+  export). `decode_activity.py` ships a `Σacti_counts` proxy classifier.
+- **Temp1-4 reconciliation (#93 ask):** these 4 per-epoch temps belong to the
+  *activity* record and are a **different record class** from the §5.4 skin-temp
+  finding (which reads two channels from the live `0x10`/`0x87` descriptor `[6:8]`/
+  `[8:10]`). They do not contradict — descriptor temp is the *live* stream; Temp1-4
+  would be the *per-epoch history* in the un-captured activity stream.
+
+**Capture to close #93 (ground truth):** a `btsnoop` sync with the sync-open
+`byte[6]` set to the step/activity selector (start with `0x02`; sweep via the #99
+`DataSyncProbe`), taken after a known walk, plus the official app's per-day step /
+active-minutes / stand readout for that day. Then confirm `[4:6]` rises monotonically
+within the day and `active_seconds` ≤ 150/epoch.
+
+#### 5.3.2 HealthKit mapping addendum (#93, design-only)
+| Source (decoded) | Confidence | HealthKit type | Notes |
+|---|---|---|---|
+| `acti_counts` `[10:20]` intensity (this record) | 🟢 role | `HKWorkout` / `appleExerciseTime` (heuristic) | active-epoch detector; band thresholds 🔴 |
+| descriptor `[4:6]` cumulative steps (§5.4) | 🟢 | `HKQuantityType stepCount` | ring's running daily total; already decoded |
+| activity `steps` `[4:6]` (predicted) | 🔴 | `stepCount` (per-epoch history) | needs the §5.3.1 capture |
+| derived `distance = steps×0.248` | 🟡 (formula) | `distanceWalkingRunning` | client-computed, not wire |
+| activity `active_seconds` (predicted) | 🔴 | `appleExerciseTime` | 0..150 s/epoch |
+| activity `dailyActiveFlag` (predicted) | 🔴 | `appleStandHour` | per-epoch stand flag |
+| activity `powerLevel` (predicted) | 🔴 | (none — internal battery curve) | per-epoch battery telemetry |
+| activity `Temp1-4` (predicted) | 🔴 | `appleSleepingWristTemperature`/`bodyTemperature` | per-epoch temp history |
 
 > **2026-06-15 first-morning sync, ground-truthed (`captures/morning_temp_20260615`).**
 > Captured the official app's first sync of the day via `adb bugreport`. App readout for the
@@ -606,9 +712,11 @@ Each names the single capture that converts a 🟡/🔴 field into a decoded met
    needs the app trace, not just a fresh capture.)
 2. ✅ **`0x4c` → sleep/HR/HRV/SpO2 epochs — DECODED.** `captures/sleep_sync_btsnoop.log`
    (2026-06-13 night) aligned to the app's readout: sleep-vitals epoch `[4]`=HR,
-   `[5]`=HRV(ms), `[8]`=SpO2(%) confirmed (§5.3); `[10:15]`=motion. Remaining 🟡/🔴:
-   `[6]`/`[7]` semantics, and respiratory rate + skin temp (not in this record — likely
-   a separate summary frame). Stages are app-computed, not on the wire. (Issue #7/#9.)
+   `[5]`=HRV(ms), `[8]`=SpO2(%) confirmed (§5.3); `[10:20]`=`acti_counts`. The APK map
+   cross-confirmed these and resolved `[6]`=confidence, `[7]`=RR×8 (#93). Skin temp +
+   RR-summary still not in this stream. Stages are app-computed, not on the wire. (Issue
+   #7/#9.) The **steps/distance/activeSeconds/powerLevel activity record (#93) is a
+   separate, un-captured stream** — see §5.3.1; blocked on a `byte[6]`-activity capture.
 3. ✅ **Counter→wall-clock — PINNED.** Counter is seconds (§5.6 epoch); the bulk-record
    step `+0x96` = **150 s**, so each `0x4c` record is a 2.5-min epoch and `0x47` records
    span `0x0384`=900 s. Cross-checked: last session ends 6 min before the sync.
