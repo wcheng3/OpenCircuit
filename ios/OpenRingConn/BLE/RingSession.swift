@@ -1020,8 +1020,13 @@ final class RingSession: NSObject {
         bulkRecords.removeAll()
         bulkFinalized = false                    // fresh capture — uncommitted until finalizeSync
         historySamples.removeAll()
-        sleepSegments.removeAll()
-        stagedSegments.removeAll()
+        // Do NOT wipe the staged sleep here. A periodic drain often returns EMPTY (nothing un-synced),
+        // and `finalizeSync`'s empty branch deliberately doesn't re-stage; wiping first would blank
+        // `sleepSegments`/`stagedSegments` and `flushHealth` reads those live (no store fallback), so
+        // last night's Health sleep-mirror could be skipped until the next non-empty drain. Keep the
+        // last staged night standing — a non-empty drain overwrites it via `commitDrainedRecords`,
+        // and a night that ages out of the archive is harmless to retain (the `.sleep` cursor blocks
+        // re-writes and the dashboard reads the persisted summary, not these).
         syncDone = false
         syncQuietTicks = 0
         syncing = true
