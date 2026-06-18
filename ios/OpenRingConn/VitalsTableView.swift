@@ -270,9 +270,11 @@ struct VitalsTableView: View {
                     .symbolEffect(.pulse, isActive: active)
             }
             .buttonStyle(.plain)
-            // Disable while a sync holds the link, OR when the ring isn't streaming (#54) — a
-            // measure would only spin until timeout; the activation hint tells the user what to do.
-            .disabled(session?.syncing == true || session?.notStreaming == true)
+            // Disable while a sync OR a #99 stream probe holds the link, OR when the ring isn't
+            // streaming (#54) — a measure would only spin until timeout; the activation hint tells
+            // the user what to do.
+            .disabled(session?.syncing == true || session?.notStreaming == true
+                      || session?.probing == true)
         }
     }
 
