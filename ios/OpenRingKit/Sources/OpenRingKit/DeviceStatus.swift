@@ -46,4 +46,47 @@ public enum DeviceStatus {
         guard (150...500).contains(a), (150...500).contains(b) else { return nil }  // 15–50 °C
         return SkinTemperature(channelA: Double(a) / 10, channelB: Double(b) / 10)
     }
+
+    // MARK: - Wear / charging proxy (#41, #60)
+    //
+    // ⚠️  PROXY ONLY. The hardware charging/wear byte at 0x10/0x87 [2] is not yet decoded
+    // (#61 — needs a charged-vs-uncharged capture pair). These functions wrap the best
+    // 🟡/🟢 proxies available today behind the same call signature that a future
+    // hardware-byte decoder will fill in — callers stay identical when #61 lands.
+    //
+    // Use `isWorn` to gate sleep detection, temperature averaging, and HealthKit writes.
+    // Use `isCharging` to surface a "ring on charger" hint in the UI. Both are labelled
+    // "inferred" / "likely" everywhere they appear — never "confirmed".
+
+    /// 🟡 Inferred wear state from the skin-temperature field of a 0x10/0x87 descriptor.
+    ///
+    /// A worn Gen-2 ring reads ~30–34 °C; off-wrist / on the charger it falls toward room
+    /// ambient (~20–24 °C). Returns `true` when the mean of the two temperature channels
+    /// is at or above the conservative `wornMinC` threshold, `false` when below, and `nil`
+    /// when the frame isn't a descriptor or has no plausible temperature reading.
+    ///
+    /// The default threshold (`ActivityPeriod.wornMinTemperatureC` = 28 °C) is used by
+    /// the sleep wear-gate (#41) — pass an explicit value to override in tests.
+    ///
+    /// - Note: A miss here (ring cold from just being put on) costs at most one unfiltered
+    ///   charger block; it never *adds* spurious sleep. Will be superseded by the decoded
+    ///   hardware byte (#61).
+    public static func isWorn(_ frame: [UInt8],
+                              wornMinC: Double = ActivityPeriod.wornMinTemperatureC) -> Bool? {
+        guard let temp = skinTemperature(frame) else { return nil }
+        return temp.celsius >= wornMinC
+    }
+
+    /// 🟢 Inferred charging state from a rolling window of battery % readings.
+    ///
+    /// True when `batteryTrend` is a strictly rising sequence (every consecutive pair
+    /// increases) — the confirmed indirect signal that the ring is charging. Delegates to
+    /// `ChargingInference.inferred(from:)`; see that type for edge-case semantics
+    /// (requires ≥ 2 readings; flat or falling returns `false`).
+    ///
+    /// - Note: Never certainty — label this "inferred" / "likely" in all UI copy.
+    ///   Will be superseded by the decoded hardware byte (#61).
+    public static func isCharging(batteryTrend: [Int]) -> Bool {
+        ChargingInference.inferred(from: batteryTrend)
+    }
 }
