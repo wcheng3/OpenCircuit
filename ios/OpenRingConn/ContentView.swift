@@ -757,6 +757,8 @@ struct CaloriesCardView: View {
     /// Today's HR samples (for the active-calorie TRIMP estimate). Predicate-limited to
     /// heart rate since start-of-day so the fetch stays small.
     @Query private var hrSamples: [StoredSample]
+    /// Today's step rollup — drives the step/distance active-calorie fallback when HR is sparse.
+    @Query private var todayDaily: [StoredDaily]
 
     init() {
         let hr = MetricKind.heartRate.rawValue
@@ -764,6 +766,7 @@ struct CaloriesCardView: View {
         _hrSamples = Query(
             filter: #Predicate { $0.kindRaw == hr && $0.start >= dayStart },
             sort: \.start)
+        _todayDaily = Query(filter: #Predicate<StoredDaily> { $0.day == dayStart }, sort: \.day)
     }
 
     private var profile: UserProfile {
@@ -778,11 +781,14 @@ struct CaloriesCardView: View {
         let fraction = Date().timeIntervalSince(dayStart) / 86_400
         return Calories.bmrKcalPerDay(profile: profile) * fraction
     }
-    /// Active kcal from today's measured HR (0 until HR is measured — it's sparse, so this
-    /// is a rough floor, not a continuous-wear estimate).
+    /// Active kcal today — the larger of the HR-TRIMP estimate (sparse; ~0 without dense HR) and a
+    /// step/distance estimate, so a day with walking still shows honest active calories instead of
+    /// 0. Both are clearly-labeled estimates (the ring transmits no active-energy value).
     private var activeToday: Double {
         let samples = hrSamples.map { HRSample(bpm: Int($0.value), start: $0.start, end: $0.end) }
-        return Calories.activeKcal(hrSamples: samples, maxHR: maxHR)
+        let hrKcal = Calories.activeKcal(hrSamples: samples, maxHR: maxHR)
+        let stepKcal = Calories.activeKcalFromSteps(steps: todayDaily.first?.steps ?? 0, profile: profile)
+        return max(hrKcal, stepKcal)
     }
 
     var body: some View {
@@ -799,7 +805,10 @@ struct CaloriesCardView: View {
             }
             Text("resting \(Int(restingToday.rounded())) · active \(Int(activeToday.rounded()))")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("BMR \(Int(Calories.bmrKcalPerDay(profile: profile).rounded())) kcal/day · max HR \(maxHR) bpm")
+            // "max HR" here is the 220−age zone/calorie reference, NOT an observed peak — so it's
+            // constant by design. Label it as an age estimate so it doesn't read as a live "max HR"
+            // stat that looks stuck day to day.
+            Text("BMR \(Int(Calories.bmrKcalPerDay(profile: profile).rounded())) kcal/day · est. max HR \(maxHR) bpm (220−age)")
                 .font(.caption2).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
