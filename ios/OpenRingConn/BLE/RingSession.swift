@@ -304,13 +304,21 @@ final class RingSession: NSObject {
         // Seed the model name from the peripheral's advertised name; may be overridden later
         // by a dedicated DIS Model Number characteristic if the ring exposes one. (#79)
         firmwareInfo.modelName = peripheral.name ?? ""
-        // Re-discovery guard (#42): on a restored / already-connected peripheral the data service
-        // is usually already discovered, so re-scanning ALL services on every relaunch is wasted
-        // work. If the data service is already present, go straight to (re-)matching its
-        // characteristics — that still re-fires `didDiscoverCharacteristicsFor`, so `ready` lands.
-        // Only fall back to a full `discoverServices` when we've never seen the service.
-        if let dataService = peripheral.services?.first(where: { $0.uuid == dataServiceUUID }) {
-            peripheral.discoverCharacteristics(nil, for: dataService)
+        // Re-discovery guard (#42): on a restored / already-connected peripheral the services are
+        // usually already cached, so re-scanning them on every relaunch is wasted work. When they're
+        // cached, go straight to (re-)matching characteristics — that still re-fires
+        // `didDiscoverCharacteristicsFor`, so `ready` lands. Only fall back to a full
+        // `discoverServices` when we've never seen the data service.
+        //
+        // Crucially, re-match EVERY cached service, not just the data service: the DIS System ID
+        // characteristic (→ MAC → SM3 auth) lives on a DIFFERENT service. Discovering only the data
+        // service skipped it, so a reconnect (cached services, e.g. switching back to a ring) never
+        // re-read the MAC and fell back to the legacy fixed auth — which only authenticates a ring
+        // whose challenge is 0xb0, hence the flaky "not streaming" on switch-back (#multi-ring).
+        if let services = peripheral.services, services.contains(where: { $0.uuid == dataServiceUUID }) {
+            for service in services {
+                peripheral.discoverCharacteristics(nil, for: service)
+            }
         } else {
             peripheral.discoverServices(nil)
         }
