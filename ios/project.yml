@@ -1,6 +1,6 @@
 name: OpenCircuit
 options:
-  bundleIdPrefix: com.dreamality
+  bundleIdPrefix: com.standardsoftwaresolutions
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
@@ -23,7 +23,7 @@ targets:
       properties:
         UILaunchScreen: {}
         # User-facing app name (home screen, Settings). Independent of PRODUCT_NAME / bundle id,
-        # which stay "OpenCircuit"/com.dreamality.opencircuit internally (#100 rebrand).
+        # which stay "OpenCircuit"/com.standardsoftwaresolutions.opencircuit internally (#100 rebrand).
         CFBundleDisplayName: OpenCircuit
         # HealthKit auth strings (Phase 4) — required or the app crashes on request. Shown verbatim
         # in the iOS permission dialogs, so they use the user-facing name "OpenCircuit".
@@ -49,27 +49,27 @@ targets:
           - fetch
           - processing
         BGTaskSchedulerPermittedIdentifiers:
-          - com.dreamality.opencircuit.bgrefresh
-          - com.dreamality.opencircuit.bgprocessing
-    # HealthKit entitlement enabled (2026-06-15) — signed under the paid Dreamality team
-    # (DEVELOPMENT_TEAM below). The App ID com.dreamality.opencircuit carries the HealthKit
+          - com.standardsoftwaresolutions.opencircuit.bgrefresh
+          - com.standardsoftwaresolutions.opencircuit.bgprocessing
+    # HealthKit entitlement enabled (2026-06-15) — signed under the paid Standard Software Solutions team
+    # (DEVELOPMENT_TEAM below). The App ID com.standardsoftwaresolutions.opencircuit carries the HealthKit
     # capability in that account; automatic signing registers it on first build.
     entitlements:
       path: OpenCircuit/OpenCircuit.entitlements
       properties: { com.apple.developer.healthkit: true }
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.dreamality.opencircuit
+        PRODUCT_BUNDLE_IDENTIFIER: com.standardsoftwaresolutions.opencircuit
         MARKETING_VERSION: "0.1"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
         # On-device signing. Set here so CLI device builds work after `xcodegen generate`
-        # (which would otherwise drop the team and fail signing). Dreamality paid team
-        # (was personal/free 64R56NUZ5P; switched 2026-06-15 to enable HealthKit).
+        # (which would otherwise drop the team and fail signing). Team 765RD9BJ8C =
+        # S&S Holdings International LLC (DBA Standard Software Solutions); paid, HealthKit-capable.
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 2ZH5MPQ5G6
+        DEVELOPMENT_TEAM: 765RD9BJ8C
 
   OpenCircuitTests:
     type: bundle.unit-test
@@ -80,6 +80,6 @@ targets:
       - target: OpenCircuit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.dreamality.opencircuit.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.standardsoftwaresolutions.opencircuit.tests
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: YES

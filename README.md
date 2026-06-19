@@ -6,7 +6,7 @@ metrics over Bluetooth LE and write them to **Apple Health**. Inspired by
 Whoop 4.0.
 
 > **OpenCircuit** is the user-facing name (home screen / store). The Xcode target,
-> the bundle id (`com.dreamality.opencircuit`), and the `OpenCircuitKit` Swift package
+> the bundle id (`com.standardsoftwaresolutions.opencircuit`), and the `OpenCircuitKit` Swift package
 > keep their original internal names for continuity. See [`docs/ROADMAP.md`](docs/ROADMAP.md)
 > for status.
 

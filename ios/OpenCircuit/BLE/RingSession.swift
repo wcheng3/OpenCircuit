@@ -5,9 +5,9 @@ import OpenCircuitKit
 import os
 
 /// Unified-logging channel for the BLE/sync path. Stream live from a connected device with:
-///   log stream --device --predicate 'subsystem == "com.dreamality.opencircuit"'
+///   log stream --device --predicate 'subsystem == "com.standardsoftwaresolutions.opencircuit"'
 /// (Logger reaches the unified log; plain `print` on iOS does not.)
-let ringLog = Logger(subsystem: "com.dreamality.opencircuit", category: "ring")
+let ringLog = Logger(subsystem: "com.standardsoftwaresolutions.opencircuit", category: "ring")
 
 // An active link to a connected ring: discovers the notify/write characteristics
 // by UUID, enables notifications, sends commands, and decodes responses through

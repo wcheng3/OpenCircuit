@@ -4,8 +4,8 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.dreamality.opencircuit.bgrefresh</string>
-		<string>com.dreamality.opencircuit.bgprocessing</string>
+		<string>com.standardsoftwaresolutions.opencircuit.bgrefresh</string>
+		<string>com.standardsoftwaresolutions.opencircuit.bgprocessing</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
