@@ -184,14 +184,14 @@ final class RingScanner: NSObject {
     /// advertised name (`matchesRingName`) and is not known to advertise its data
     /// service, so filtering there could miss it. The background path passes
     /// `backgroundScanServices` because nil-filtered scans are dropped while backgrounded.
-    func start(services: [CBUUID]? = nil, forcePicker: Bool = false) {
+    func start(services: [CBUUID]? = nil) {
         guard central.state == .poweredOn else { return }
         wantConnection = true
         resetReconnectBackoff()   // a fresh user scan starts clean — no lingering backoff/calm state
         // Foreground scans (nil filter) accumulate matches and let the user pick when >1 ring is in
         // range; background scans (service-filtered) connect on the first match — there's no UI.
         allowPicker = (services == nil)
-        choosingRing = forcePicker && allowPicker
+        choosingRing = false
         if allowPicker {
             clearDiscovery()
             armScanTimeout()
@@ -200,13 +200,24 @@ final class RingScanner: NSObject {
         central.scanForPeripherals(withServices: services)
     }
 
-    /// Break the current link and scan in "choose" mode so the user can switch to a DIFFERENT ring.
-    /// Needed because the app silently auto-reconnects to the active ring — without an explicit switch
-    /// the other rings never get a chance to be picked. Active ring is preserved (disconnect, not
-    /// stop) until the user actually picks a new one.
-    func chooseRing() {
-        disconnect()                 // drop the current link; does NOT clear the active ring
-        start(forcePicker: true)     // foreground scan that always shows the picker
+    /// Scan for OTHER nearby rings for the in-app "Connect a different ring" picker, WITHOUT dropping
+    /// the current link. The connected ring doesn't advertise, so it won't appear; the user stays
+    /// connected (and reconnect-safe) until they actually pick another. The picker view reads
+    /// `discovered`, taps call `connect(to:)`, and dismissing calls `stopBrowsing()`. We deliberately
+    /// do NOT enter the `.scanning` state — the existing connection (and its UI) stays as-is.
+    func startBrowsing() {
+        guard central.state == .poweredOn else { return }
+        allowPicker = true     // didDiscover accumulates into `discovered` instead of connect-on-first
+        choosingRing = true    // never auto-connect a lone ring — the user is explicitly choosing
+        clearDiscovery()
+        central.scanForPeripherals(withServices: nil)
+    }
+
+    /// Stop the in-app picker scan (sheet dismissed / ring chosen). Leaves any current link intact.
+    func stopBrowsing() {
+        choosingRing = false
+        clearDiscovery()
+        central.stopScan()
     }
 
     /// Connect to a specific discovered ring — a picker tap, or the auto-connect of a lone match.
@@ -217,6 +228,12 @@ final class RingScanner: NSObject {
         selectionDebounce?.cancel(); selectionDebounce = nil
         scanTimeoutTask?.cancel(); scanTimeoutTask = nil
         central.stopScan()
+        // Switching from a DIFFERENT live ring (the in-app picker scans without dropping the current
+        // link): tear the old one down first so we don't leak its connection / run two sessions.
+        if let current = target, current.identifier != id {
+            central.cancelPeripheralConnection(current)
+            teardownSession()
+        }
         wantConnection = true
         target = peripheral
         state = .connecting(peripheral.name ?? "RingConn")

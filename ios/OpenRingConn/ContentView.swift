@@ -413,15 +413,14 @@ struct ContentView: View {
             if !connected {
                 switch scanner.state {
                 case .scanning:
-                    // Show the picker when >1 ring is around, or whenever the user is deliberately
-                    // choosing (even a single ring, so the active one can't silently grab the link
-                    // back). Otherwise we're still searching.
-                    if scanner.discovered.count > 1 || (scanner.choosingRing && !scanner.discovered.isEmpty) {
+                    // >1 ring nearby on a fresh scan → let the user pick; otherwise we're still
+                    // looking (a lone ring auto-connects after a short settle).
+                    if scanner.discovered.count > 1 {
                         ringPicker
                     } else {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
-                            Text(scanner.choosingRing ? "Looking for rings…" : "Searching for ring…")
+                            Text("Searching for ring…")
                                 .font(.subheadline).foregroundStyle(.secondary)
                             Spacer()
                             Button("Cancel") { scanner.cancelScan() }.font(.subheadline)
@@ -448,11 +447,10 @@ struct ContentView: View {
         }
     }
 
-    /// The ring list — shown when a scan finds >1 ring, or whenever the user taps "Connect a
-    /// different ring" (Device Info).
-    /// Tapping a row connects to that ring and makes it active. The "Last used" badge marks the
-    /// previously active ring; rows are ordered active-first, then by name (a stable key), with a
-    /// per-row signal glyph showing proximity.
+    /// The ring list shown on the dashboard when a fresh "Scan & connect" finds more than one ring.
+    /// (Switching rings later uses the dedicated picker sheet in Device Info.) Tapping a row connects
+    /// to that ring and makes it active. The "Last used" badge marks the previously active ring; rows
+    /// are ordered active-first, then by name (a stable key), with a per-row signal glyph for proximity.
     private var ringPicker: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(scanner.choosingRing ? "Choose a ring" : "Multiple rings found — pick one")
