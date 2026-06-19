@@ -65,7 +65,7 @@ This script therefore:
      records yields implausible values, demonstrating they are not activity records.
 
 Usage:
-  python -m openringconn decode-log captures/walk.log --addr <mac> > /tmp/walk.txt
+  python -m opencircuit decode-log captures/walk.log --addr <mac> > /tmp/walk.txt
   python decode_activity.py /tmp/walk.txt              # or the *_decoded.txt files
 """
 import re

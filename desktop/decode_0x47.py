@@ -14,7 +14,7 @@ overlaid on the finger-off timestamps.
 
 Usage:
   # 1. turn the btsnoop into a decoded txt with the existing tool:
-  python -m openringconn decode-log captures/ppg_align_btsnoop.log > captures/ppg_align_decoded.txt
+  python -m opencircuit decode-log captures/ppg_align_btsnoop.log > captures/ppg_align_decoded.txt
   # 2. decode the 0x47 payloads both ways:
   python decode_0x47.py captures/ppg_align_decoded.txt
 """

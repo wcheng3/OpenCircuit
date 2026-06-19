@@ -6,7 +6,7 @@ arrives (= timestamp accepted, state machine advanced). Then try 06/07 + poll.
 """
 import asyncio, struct, sys, time
 from bleak import BleakClient
-from openringconn import ble, session
+from opencircuit import ble, session
 
 ADDR = sys.argv[1] if len(sys.argv) > 1 else "63E2C4D4-7E06-CA73-568B-062FAA032213"
 EPOCH_2020 = 1577836800

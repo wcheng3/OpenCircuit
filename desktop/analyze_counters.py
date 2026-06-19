@@ -15,7 +15,7 @@ import struct, sys, os
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
-from openringconn.sniff import _iter_att
+from opencircuit.sniff import _iter_att
 
 RING_EPOCH = 1577793600  # 2019-12-31 12:00:00 UTC
 CAPTURES = os.path.join(os.path.dirname(__file__), "captures")

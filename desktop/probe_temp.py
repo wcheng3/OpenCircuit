@@ -16,7 +16,7 @@ import collections
 import sys
 
 from bleak import BleakClient
-from openringconn import ble, session
+from opencircuit import ble, session
 
 ADDR = sys.argv[1] if len(sys.argv) > 1 else "63E2C4D4-7E06-CA73-568B-062FAA032213"
 GOOD_CURSOR = "0c2298c3"   # known to return data on the phone (FR02.018 capture)

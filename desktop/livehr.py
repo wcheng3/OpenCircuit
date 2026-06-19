@@ -7,7 +7,7 @@ can see exactly where the flow stalls. Full sequence:
 """
 import asyncio, sys, collections
 from bleak import BleakClient
-from openringconn import ble, session
+from opencircuit import ble, session
 
 ADDR = sys.argv[1] if len(sys.argv) > 1 else "63E2C4D4-7E06-CA73-568B-062FAA032213"
 

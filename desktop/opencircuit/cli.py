@@ -1,11 +1,11 @@
 """Command-line entry point for the RingConn RE workbench.
 
-    python -m openringconn scan
-    python -m openringconn enumerate --addr AA:BB:CC:DD:EE:FF
-    python -m openringconn listen --addr AA:BB:CC:DD:EE:FF [--keepalive]
-    python -m openringconn replay --addr ... --hex 950095 --handle 0x0802
-    python -m openringconn decode-log captures/btsnoop_hci.log
-    python -m openringconn guess-checksum --hex "0e00....crc"
+    python -m opencircuit scan
+    python -m opencircuit enumerate --addr AA:BB:CC:DD:EE:FF
+    python -m opencircuit listen --addr AA:BB:CC:DD:EE:FF [--keepalive]
+    python -m opencircuit replay --addr ... --hex 950095 --handle 0x0802
+    python -m opencircuit decode-log captures/btsnoop_hci.log
+    python -m opencircuit guess-checksum --hex "0e00....crc"
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def _parse_handle(s: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="openringconn", description=__doc__,
+    p = argparse.ArgumentParser(prog="opencircuit", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 

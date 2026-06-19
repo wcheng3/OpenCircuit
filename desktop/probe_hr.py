@@ -7,7 +7,7 @@ which (if any) produces 0x15 live-HR frames. Run once; paste the SUMMARY.
 """
 import asyncio, struct, sys, time
 from bleak import BleakClient
-from openringconn import ble, session
+from opencircuit import ble, session
 
 
 def fresh_02() -> str:

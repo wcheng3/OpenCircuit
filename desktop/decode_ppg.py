@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decode the RingConn Gen 2 bulk PPG stream (`0x47` pages).
 
-Reads the text output of `python -m openringconn decode-log <btsnoop>` and
+Reads the text output of `python -m opencircuit decode-log <btsnoop>` and
 reassembles the `0x47` record stream into 10-bit PPG samples.
 
 A 0x47 page: [0]=0x47 [1]=00 [2]=remaining-record countdown, then N×47-byte
@@ -20,7 +20,7 @@ Record (47 B), confirmed against captures/sleep_sync_btsnoop.log (FR02.018):
           only as a display aid; it does NOT correspond to two physical channels.
 
 Usage:
-  python -m openringconn decode-log captures/foo.log --addr <mac> > /tmp/dec.txt
+  python -m opencircuit decode-log captures/foo.log --addr <mac> > /tmp/dec.txt
   python decode_ppg.py /tmp/dec.txt
 """
 import re

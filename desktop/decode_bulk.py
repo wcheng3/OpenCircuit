@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decode the RingConn Gen 2 bulk activity/sleep stream (`0x4c` pages).
 
-Reads the text output of `python -m openringconn decode-log <btsnoop>` and
+Reads the text output of `python -m opencircuit decode-log <btsnoop>` and
 reassembles the `0x4c` record stream into per-epoch records, converting the
 24-bit counter to wall-clock via the §5.6 epoch.
 
@@ -36,7 +36,7 @@ Respiratory rate + skin temp are NOT per-epoch here (derived/summary).
 Sleep stages are app-computed from these signals, not stored on the wire.
 
 Usage:
-  python -m openringconn decode-log captures/foo.log --addr <mac> > /tmp/dec.txt
+  python -m opencircuit decode-log captures/foo.log --addr <mac> > /tmp/dec.txt
   python decode_bulk.py /tmp/dec.txt
 """
 import re
