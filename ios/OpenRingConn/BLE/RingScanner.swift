@@ -225,11 +225,13 @@ final class RingScanner: NSObject {
     func connect(to id: UUID) {
         guard let peripheral = discoveredPeripherals[id] else { return }
         choosingRing = false
+        resetReconnectBackoff()   // drop any pending backoff reconnect to the previous ring (#multi-ring)
         selectionDebounce?.cancel(); selectionDebounce = nil
         scanTimeoutTask?.cancel(); scanTimeoutTask = nil
         central.stopScan()
         // Switching from a DIFFERENT live ring (the in-app picker scans without dropping the current
-        // link): tear the old one down first so we don't leak its connection / run two sessions.
+        // link): tear the old one down first so we don't leak its connection / run two sessions. The
+        // identity guards in didDisconnect/didFailToConnect ignore the old ring's late callbacks.
         if let current = target, current.identifier != id {
             central.cancelPeripheralConnection(current)
             teardownSession()
@@ -620,6 +622,11 @@ extension RingScanner: CBCentralManagerDelegate {
                                     didDisconnectPeripheral peripheral: CBPeripheral,
                                     error: Error?) {
         Task { @MainActor in
+            // Ignore disconnects for a ring we've intentionally moved on from. When switching rings,
+            // `connect(to:)` cancels the old ring and sets `target` to the new one synchronously — so
+            // a late `didDisconnect` for the OLD ring must not tear down the new session or reconnect
+            // the old ring (which would bounce us back and leak the new link). (#multi-ring)
+            guard peripheral.identifier == self.target?.identifier else { return }
             self.connectStableTask?.cancel(); self.connectStableTask = nil
             self.teardownSession()   // cancel ALL of the session's tasks, persisting last reading (#42)
             // Auto-reconnect: CoreBluetooth's connect has no timeout — it reconnects (using the
@@ -642,6 +649,9 @@ extension RingScanner: CBCentralManagerDelegate {
                                     didFailToConnect peripheral: CBPeripheral,
                                     error: Error?) {
         Task { @MainActor in
+            // Same identity guard as didDisconnect: a failed connect for a ring we've switched away
+            // from must not schedule a reconnect to it over the new target. (#multi-ring)
+            guard peripheral.identifier == self.target?.identifier else { return }
             self.connectStableTask?.cancel(); self.connectStableTask = nil
             if self.wantConnection {
                 self.scheduleReconnect(peripheral)
