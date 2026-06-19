@@ -545,8 +545,8 @@ curve — it is NOT a per-session marker) · **`[2]`=CHARGE/STATE: `0x04`=ON CHA
 **`[4:6]`=STEP COUNT (16-bit BE)** 🟢 ·
 **`[6:8]`/`[8:10]`=SKIN TEMPERATURE, two channels, 0.1 °C BE** 🟢 (each prefixed `01`=
 valid; see below) · **`[14:16]`=BATTERY VOLTAGE mV (16-bit BE)** 🟢 (#89, see below) ·
-`[17]`=`ff` idle / **`0x46` while charging** 🟢 (second witness to `[2]`; supersedes the
-old "non-`ff` = data-follows" guess).
+**`[17]`=CASE BATTERY: low 7 bits = case %, bit `0x80` = case charging, `0xff` = not in case** 🟢
+(#89; corrects the earlier "`0x46`=charging witness" / "data-follows" reads — see below).
 
 **`[2]` = charge/state byte; `0x04` = ON CHARGER · `[14:16]` = battery voltage mV** 🟢
 (resolved 2026-06-19, **#61** + **#89**; `captures/charger66b`, labelled A/B
@@ -558,8 +558,17 @@ fell **31.4→26.6 °C**; against that ground truth:
   frame, and `0x01` is a brief connect/settle transient. The earlier brief test (06-19
   10:31) that *looked* like it falsified this was just too-short charger taps — they still
   flipped `[2]`→`0x04`, but never moved battery/temp.
-- **`[17]==0x46` co-occurs exclusively with `0x04`** (29/35 charge frames; 0 of 428 worn
-  frames) — an independent corroborating indicator. It lags the first frame or two of a charge.
+- **`[17]` = CHARGING-CASE BATTERY** 🟢 (resolved 2026-06-19, **#89**; `captures/case89`,
+  in-case A/B). Byte `[17]` packs both app fields: **low 7 bits = case battery %**
+  (`chargingCasePower`), **bit `0x80` = case charging** (`chargingCaseCharging`), and **`0xff` =
+  ring not docked in the case**. Ground truth matched exactly: ring placed in case → `0x46` (70 %,
+  app showed case 70 %); case plugged in to charge → `0xc6` (70 % **+ charging**); ring re-docked
+  later → `0xda` (90 %, app showed 90 %); `0xff` whenever the ring was out of the case. This
+  **corrects** the earlier reading of `[17]==0x46` as a "charging witness" — it was simply the
+  case sitting at 70 % while the ring was docked in it (the real charging signal is `[2]==0x04`),
+  and it also supersedes the old "non-`ff` = data-follows" guess. Decoded by
+  `OpenCircuitKit.DeviceStatus.caseBattery`. (Matches the app's device-status model field order:
+  `power, state, step, volt, …, chargingCasePower, chargingCaseCharging` — APK `dMb`/`AMb`.)
 - **`[14:16]` = battery voltage in mV** (16-bit BE): `4001` mV worn → climbs monotonically
   to `4384` mV peak charge → relaxes to `4196` mV off-charger — a textbook single-cell Li-ion
   curve. This is **#89's "ring raw voltage."** (Supersedes the old `[14]` "declines over days"

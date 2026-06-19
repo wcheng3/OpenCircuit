@@ -187,6 +187,10 @@ final class RingSession: NSObject {
     /// #89), or nil until a valid frame. ~4000 mV worn, climbs toward ~4400 mV on the charger.
     private(set) var batteryVoltageMV: Int?
 
+    /// 🟢 Charging-case battery from the descriptor `[17]` (`DeviceStatus.caseBattery`, #89): case %
+    /// + whether the case itself is charging. nil when the ring isn't docked in the case (0xff).
+    private(set) var caseBattery: DeviceStatus.CaseBattery?
+
     /// Rolling battery % readings (oldest→newest, capped) for the charging-inference fallback (#60).
     private var batteryTrend: [Int] = []
     private static let batteryTrendCapacity = 4
@@ -1495,6 +1499,10 @@ extension RingSession: CBPeripheralDelegate {
             if let mv = DeviceStatus.batteryVoltageMillivolts(bytes) {
                 if mv != self.batteryVoltageMV { self.batteryVoltageMV = mv }
             }
+            // Charging-case battery (#89): [17] low7 = case %, bit 0x80 = case charging, 0xff = not
+            // docked. Always reassign (nil when the ring leaves the case) so the UI clears promptly.
+            let caseB = DeviceStatus.caseBattery(bytes)
+            if caseB != self.caseBattery { self.caseBattery = caseB }
             // Ring battery % is descriptor byte[1] (§5.4 🟢, ground-truthed).
             // Also stamps `batteryFetchedAt` (#57) and extends the charging-inference trend (#60)
             // and the TTE sample window (#86).

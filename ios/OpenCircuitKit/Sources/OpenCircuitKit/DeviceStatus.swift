@@ -47,20 +47,23 @@ public enum DeviceStatus {
         return SkinTemperature(channelA: Double(a) / 10, channelB: Double(b) / 10)
     }
 
-    // MARK: - Charging state + voltage (DECODED, #61 / #89)
+    // MARK: - Charging state + voltage + case battery (DECODED, #61 / #89)
     //
-    // Resolved 2026-06-19 by a clean labelled A/B capture (finger → charger → off → finger):
-    // over a 6-min charge the battery rose 66→74 % and the skin temp fell 31→27 °C, and against
-    // that ground truth `[2]` read **0x04 for 100 % of charging frames and never** in the worn
-    // or off-wrist-idle phases. Confirmed buffer-wide: of all 0x10/0x87 frames, `[2]==0x04` is
-    // ~30× enriched for a rising-battery window vs `0x02`/`0x03`, and `[17]==0x46` co-occurs
-    // **exclusively** with `0x04` (0 of 428 worn frames) — an independent second witness.
-    //   `[2]`: 0x02/0x03 = worn-streaming sub-frame toggle · 0x01 = startup/settle · **0x04 = ON CHARGER** 🟢
-    //   `[14:16]` = battery voltage, mV, 16-bit BE (4001→4384 mV across the charge; Li-ion curve) 🟢
+    // Resolved 2026-06-19 by clean labelled A/B captures. Charger A/B (finger → charger → off →
+    // finger): over a 6-min charge the battery rose 66→74 % and skin temp fell 31→27 °C, and `[2]`
+    // read **0x04 for 100 % of charging frames and never** in the worn/off-wrist phases (~30×
+    // enriched for a rising-battery window vs 0x02/0x03). In-case A/B (case 70→90 %, ring 93→99 %):
+    // `[17]` tracked the case battery exactly. Map of the 0x10/0x87 status model (matches the app's
+    // device-status fields: power, state, step, volt, …, chargingCasePower, chargingCaseCharging):
+    //   `[1]`  = ring battery %                                                          🟢
+    //   `[2]`  = state: 0x02/0x03 worn-stream toggle · 0x01 startup/settle · **0x04 ON CHARGER** 🟢
+    //   `[4:6]`= step · `[6:10]` = skin temp (2 ch)                                       🟢
+    //   `[14:16]` = ring voltage mV, 16-bit BE (4001→4384 across the charge)              🟢
+    //   `[17]` = **CASE byte**: low 7 bits = case battery % · bit 0x80 = case charging ·
+    //            0xff = ring NOT in case  (#89; was mis-read as a charging witness pre-fix) 🟢
 
     /// 🟢 True when a 0x10/0x87 descriptor reports the ring is **on the charger** (`[2] == 0x04`,
-    /// PROTOCOL.md §5.4). `[17] == 0x46` corroborates while charging but is not required (it lags
-    /// the first frame or two of a charge). Returns nil if the frame isn't a descriptor.
+    /// PROTOCOL.md §5.4). Returns nil if the frame isn't a descriptor.
     ///
     /// This is the real hardware signal that supersedes the `isCharging(batteryTrend:)` proxy:
     /// it is per-frame, instant (flips on contact before temperature or battery % move), and does
@@ -80,6 +83,31 @@ public enum DeviceStatus {
         guard frame.count >= 19, frame[0] == 0x10 || frame[0] == 0x87 else { return nil }
         let mv = (Int(frame[14]) << 8) | Int(frame[15])
         return (2500...4600).contains(mv) ? mv : nil
+    }
+
+    /// Charging-case state decoded from a 0x10/0x87 descriptor `[17]` (#89 🟢).
+    public struct CaseBattery: Equatable, Sendable {
+        /// Case battery percentage (0…100).
+        public let percent: Int
+        /// True when the case itself is plugged in and charging (bit 0x80).
+        public let isCharging: Bool
+    }
+
+    /// 🟢 Charging-case battery from a 0x10/0x87 descriptor: byte `[17]` packs both app fields —
+    /// **low 7 bits = case battery %** (`chargingCasePower`), **bit 0x80 = case charging**
+    /// (`chargingCaseCharging`). `0xff` is the sentinel for **ring not in the case** → nil.
+    ///
+    /// Ground-truthed 2026-06-19 (`captures/case89`): in-case readings 0x46→70 %, 0xc6→70 %+charging,
+    /// 0xda→90 %+charging matched the official app's case % exactly; 0xff whenever the ring was out
+    /// of the case. Returns nil if the frame isn't a descriptor, the ring isn't docked (0xff), or
+    /// the percentage is implausible (> 100).
+    public static func caseBattery(_ frame: [UInt8]) -> CaseBattery? {
+        guard frame.count >= 19, frame[0] == 0x10 || frame[0] == 0x87 else { return nil }
+        let b = frame[17]
+        guard b != 0xff else { return nil }                 // not docked in the case
+        let pct = Int(b & 0x7f)
+        guard pct <= 100 else { return nil }                // garbage guard
+        return CaseBattery(percent: pct, isCharging: (b & 0x80) != 0)
     }
 
     // MARK: - Wear proxy (#41, #56) + battery-trend charging fallback (#60)

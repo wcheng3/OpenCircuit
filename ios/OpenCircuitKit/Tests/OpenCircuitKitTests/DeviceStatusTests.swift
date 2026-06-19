@@ -178,6 +178,42 @@ final class DeviceStatusTests: XCTestCase {
         XCTAssertNil(DeviceStatus.batteryVoltageMillivolts(notDesc))
     }
 
+    // MARK: - caseBattery ([17] = chargingCasePower | charging bit, #89)
+    //
+    // Fixtures are the real [17] values from the 2026-06-19 in-case capture (case89):
+    // 0x46→70%, 0xc6→70%+charging, 0xda→90%+charging, 0xff→ring not docked.
+
+    private func frame(case17 b: UInt8) -> [UInt8] { var f = wornFrame; f[17] = b; return f }
+
+    func testCaseBatteryNilWhenNotDocked() {
+        XCTAssertNil(DeviceStatus.caseBattery(frame(case17: 0xff)))   // 0xff = not in case
+    }
+
+    func testCaseBatteryDecodesPercentNotCharging() {
+        let c = DeviceStatus.caseBattery(frame(case17: 0x46))
+        XCTAssertEqual(c, DeviceStatus.CaseBattery(percent: 70, isCharging: false))
+    }
+
+    func testCaseBatteryDecodesChargingBit() {
+        let c = DeviceStatus.caseBattery(frame(case17: 0xc6))         // 0x80 | 70
+        XCTAssertEqual(c, DeviceStatus.CaseBattery(percent: 70, isCharging: true))
+    }
+
+    func testCaseBatteryDecodesNinetyCharging() {
+        let c = DeviceStatus.caseBattery(frame(case17: 0xda))         // 0x80 | 90
+        XCTAssertEqual(c, DeviceStatus.CaseBattery(percent: 90, isCharging: true))
+    }
+
+    func testCaseBatteryWorksFor0x87() {
+        var f = frame(case17: 0x5a); f[0] = 0x87
+        XCTAssertEqual(DeviceStatus.caseBattery(f), DeviceStatus.CaseBattery(percent: 90, isCharging: false))
+    }
+
+    func testCaseBatteryNilForNonDescriptor() {
+        var f = frame(case17: 0x46); f[0] = 0x4C
+        XCTAssertNil(DeviceStatus.caseBattery(f))
+    }
+
     // MARK: - Combined: still + ambient temp + battery-rising → NOT sleep (#41 core case)
     //
     // This is the key regression guard: a ring on the charger produces a still motion

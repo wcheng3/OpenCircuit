@@ -424,6 +424,16 @@ struct ContentView: View {
                                     .font(.caption2).foregroundStyle(.tertiary)
                             }
                         }
+                        // Charging-case battery (#89): shown only while the ring is docked in the
+                        // case (the decoded [17] byte). ⚡ when the case itself is charging.
+                        if let cs = session?.caseBattery {
+                            HStack(spacing: 2) {
+                                Image(systemName: "suitcase.fill").font(.caption2)
+                                Text("Case \(cs.percent)%").font(.caption2)
+                                if cs.isCharging { Image(systemName: "bolt.fill").font(.caption2) }
+                            }
+                            .foregroundStyle(cs.isCharging ? AnyShapeStyle(Color.green) : AnyShapeStyle(.tertiary))
+                        }
                     }
                 }
             }
