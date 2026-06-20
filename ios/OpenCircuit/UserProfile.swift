@@ -7,6 +7,14 @@ struct UserProfileSettingsView: View {
     @AppStorage("userProfile.weightKg") private var weightKg = 70.0
     @AppStorage("userProfile.heightCm") private var heightCm = 170.0
     @AppStorage("userProfile.sex") private var sexRaw = BiologicalSex.male.rawValue
+
+    // Height is edited via local feet/inches buffers, seeded from `heightCm` on appear and
+    // written back on change. Binding the text fields straight to a `heightCm`-derived value
+    // reset them on every keystroke (the shared @AppStorage write re-rendered the field
+    // mid-edit), which made the inches field nearly uneditable — couldn't enter 10/11.
+    @State private var heightFeetInput = 0
+    @State private var heightInchesInput = 0
+
     // Periodic auto-measure toggle — same UserDefaults key RingSession reads. Default true
     // (the user opted into periodic measuring); flip off to save ring battery.
     @AppStorage(RingSession.autoMeasureEnabledKey) private var autoMeasureEnabled = true
@@ -78,17 +86,25 @@ struct UserProfileSettingsView: View {
                 }
                 LabeledContent("Height") {
                     HStack(spacing: 4) {
-                        TextField("ft", value: heightFeet, format: .number)
+                        TextField("ft", value: $heightFeetInput, format: .number)
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                             .frame(maxWidth: 36)
+                            .onChange(of: heightFeetInput) { _, _ in commitHeight() }
                         Text("ft").foregroundStyle(.secondary)
-                        TextField("in", value: heightInches, format: .number)
+                        TextField("in", value: $heightInchesInput, format: .number)
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                             .frame(maxWidth: 36)
+                            .onChange(of: heightInchesInput) { _, newValue in
+                                // A typed value ≥12 (or negative) snaps back into 0...11.
+                                let clamped = min(max(newValue, 0), 11)
+                                if clamped != newValue { heightInchesInput = clamped }
+                                commitHeight()
+                            }
                         Text("in").foregroundStyle(.secondary)
                     }
+                    .onAppear { seedHeightInputs() }
                 }
                 Picker("Sex", selection: $sexRaw) {
                     ForEach(BiologicalSex.allCases, id: \.rawValue) { sex in
@@ -299,20 +315,19 @@ struct UserProfileSettingsView: View {
     /// Total height in whole inches (rounded), the basis for the ft/in split.
     private var totalInches: Int { Int((heightCm / Self.cmPerIn).rounded()) }
 
-    private var heightFeet: Binding<Int> {
-        Binding(get: { totalInches / 12 },
-                set: { newFeet in
-                    let inches = totalInches % 12
-                    heightCm = Double(max(newFeet, 0) * 12 + inches) * Self.cmPerIn
-                })
+    /// Seed the local ft/in editing fields from the stored height. Done on appear so the text
+    /// fields hold their own state and typing isn't reset by the shared `heightCm` store.
+    private func seedHeightInputs() {
+        let total = totalInches
+        heightFeetInput = total / 12
+        heightInchesInput = total % 12
     }
 
-    private var heightInches: Binding<Int> {
-        Binding(get: { totalInches % 12 },
-                set: { newInches in
-                    let feet = totalInches / 12
-                    heightCm = Double(feet * 12 + min(max(newInches, 0), 11)) * Self.cmPerIn
-                })
+    /// Write the local ft/in fields back to `heightCm`, clamping inches to 0...11.
+    private func commitHeight() {
+        let feet = max(heightFeetInput, 0)
+        let inches = min(max(heightInchesInput, 0), 11)
+        heightCm = Double(feet * 12 + inches) * Self.cmPerIn
     }
 
     // MARK: Sleep-schedule bindings (minutes-since-midnight <-> Date for DatePicker)

@@ -42,8 +42,13 @@ final class HealthKitWriter {
         case .sleep: return nil
         // ESTIMATE — steps × stride. See DistanceEstimate.swift for the derivation (#81).
         case .distance: id = .distanceWalkingRunning
-        // ESTIMATE — elevated HR minutes. Basic threshold; 4-level intensity follows #93 (#82).
-        case .exerciseMinutes: id = .appleExerciseTime
+        // Apple Exercise Time is an Apple-COMPUTED Activity-ring metric — NOT third-party
+        // shareable or writable. Listing it in `requestAuthorization(toShare:)` raises an Obj-C
+        // NSInvalidArgumentException (-[HKHealthStore _throwIfAuthorizationDisallowedForSharing:])
+        // that crashed the app on first Health auth (TestFlight #110), and `save()` of it errors.
+        // Apps contribute exercise time only via HKWorkout (the #93 path), so there is no writable
+        // quantity type for it — return nil so it is excluded from BOTH the auth set and writes.
+        case .exerciseMinutes: return nil
         }
         return HKQuantityType(id)
     }
@@ -402,9 +407,7 @@ final class HealthKitWriter {
     private static let activeWrittenKey = "hk.activeEnergy.writtenKcal"
     // Exercise minutes (#82) watermark — like active energy, delta-based per day.
     private static let exerciseDayKey     = "hk.exerciseTime.day"         // start-of-day
-    private static let exerciseWrittenKey = "hk.exerciseTime.writtenMin"  // total minutes already pushed
-    // Metadata key for estimated exercise time samples
-    static let exerciseEstimateMetadataKey = "OpenCircuitExerciseTimeEstimated"
+    private static let exerciseWrittenKey = "hk.exerciseTime.writtenMin"  // total minutes already counted
 
     // Distance double-count avoidance (steps×stride estimate vs workout GPS).
     // WorkoutSessionManager records foot-based (walk/run/hike) GPS distance written to
@@ -638,18 +641,13 @@ final class HealthKitWriter {
             defaults.set(writtenMin, forKey: Self.exerciseWrittenKey)
             return 0
         }
-        do {
-            let type = HKQuantityType(.appleExerciseTime)
-            let qty = HKQuantity(unit: .minute(), doubleValue: pendingMin)
-            // Tag as estimated so Health readers know this came from a basic HR threshold,
-            // NOT the ring's native activity-intensity sensor data (#93).
-            let sample = HKQuantitySample(type: type, quantity: qty, start: today, end: now,
-                                          metadata: [Self.exerciseEstimateMetadataKey: true])
-            try await store.save(sample)
-            defaults.set(today.timeIntervalSince1970, forKey: Self.exerciseDayKey)
-            defaults.set(totalMin, forKey: Self.exerciseWrittenKey)
-            return pendingMin
-        } catch { return 0 }
+        // Apple Exercise Time is Apple-computed and not third-party writable (saving it errors,
+        // and requesting share auth for it crashes — see `quantityType(for:)`). So the estimate
+        // is surfaced in-app only and is NOT mirrored to Apple Health; advance the day watermark
+        // so the running total stays correct. Contributing to the Exercise ring needs HKWorkout (#93).
+        defaults.set(today.timeIntervalSince1970, forKey: Self.exerciseDayKey)
+        defaults.set(totalMin, forKey: Self.exerciseWrittenKey)
+        return pendingMin
     }
 
     /// Write a night as contiguous sleepAnalysis category samples (mapping notes).
