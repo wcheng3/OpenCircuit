@@ -54,6 +54,14 @@ struct OpenCircuitApp: App {
     /// store, and raise `historyResetDefaultsKey` so the UI can tell the user. Raw epoch samples
     /// are not backed up — they're already in Apple Health. (#40)
     static func makeContainer() -> ModelContainer {
+        // A brand-new app container (fresh install / new bundle id) has no
+        // `Library/Application Support` directory, where SwiftData's default store lives. If it's
+        // missing, store creation fails — and because `exportBeforeWipe` bails before it would
+        // create the directory, BOTH the initial and the post-wipe `ModelContainer` attempts below
+        // fail and hit the `fatalError` → black screen on first launch. Create it up front so a
+        // fresh install opens cleanly. (#fresh-install-crash)
+        _ = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                         appropriateFor: nil, create: true)
         let schema = Schema([StoredSample.self, StoredCursor.self,
                              StoredSleepSummary.self, StoredDaily.self, StoredNap.self,
                              StoredPeriodEntry.self])
