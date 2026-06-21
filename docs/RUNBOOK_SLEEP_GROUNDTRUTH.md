@@ -78,6 +78,18 @@ cert to download it. Then install it:
 > network errors), you're hitting this and/or pinning — go to the **Pinning caveat**
 > section. (A rooted phone or emulator can install the cert into the *system* store,
 > which clears the user-CA limitation but not pinning.)
+>
+> **System-store install (rooted device / emulator)** — clears the Android 7+ user-CA limit
+> without Frida (pinning, if present, still needs the Frida step below):
+> ```
+> # mitmproxy stores its CA at ~/.mitmproxy/mitmproxy-ca-cert.pem
+> HASH=$(openssl x509 -inform PEM -subject_hash_old -in ~/.mitmproxy/mitmproxy-ca-cert.pem -noout | head -1)
+> cp ~/.mitmproxy/mitmproxy-ca-cert.pem "$HASH.0"
+> adb root && adb remount                       # emulator: `adb root`; some need `-writable-system`
+> adb push "$HASH.0" /system/etc/security/cacerts/
+> adb shell chmod 644 /system/etc/security/cacerts/$HASH.0
+> adb reboot
+> ```
 
 ### 5. Trigger the fetch and capture
 1. Open the **RingConn app** and **sync the ring** (pull-to-refresh on Home; let it

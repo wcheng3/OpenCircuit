@@ -151,21 +151,31 @@ final class SleepStagingTests: XCTestCase {
     /// tuning vs. an explicit `Tuning(rrVarWeight: 0)`. This is the safety property that
     /// guarantees the RR feature regresses nothing until it is deliberately fit.
     func testRrVarWeightZeroIsNoOp() {
-        var recs: [BulkRecord] = []
-        var c: UInt32 = 0x0c220000
-        for _ in 0..<12 { recs.append(arec(c)); c += step }
-        // A varied night carrying RR (and SpO2 via [8]) on every asleep epoch.
-        for k in 0..<140 {
-            recs.append(vrecRR(c, hr: k % 3 == 0 ? 52 : 58, hrv: 55,
-                               rr: k % 2 == 0 ? 13 : 18)); c += step
+        // Build a night WITHOUT RR (vrec, raw[7]=0) and the IDENTICAL night WITH RR injected
+        // (vrecRR) — same HR/HRV/motion/SpO2. At the default tuning (rrVarWeight 0) RR carriage
+        // must not change a SINGLE segment. This proves the feature is genuinely inert (the RR
+        // values flow through the rows but never reach a decision), not merely that 0 == 0.
+        func night(rr: Bool) -> [BulkRecord] {
+            var recs: [BulkRecord] = []
+            var c: UInt32 = 0x0c220000
+            for _ in 0..<12 { recs.append(arec(c)); c += step }
+            for k in 0..<140 {
+                let hr: UInt8 = k % 3 == 0 ? 52 : 58
+                recs.append(rr ? vrecRR(c, hr: hr, hrv: 55, rr: k % 2 == 0 ? 13 : 18)
+                               : vrec(c, hr: hr, hrv: 55))
+                c += step
+            }
+            for _ in 0..<12 { recs.append(arec(c)); c += step }
+            return recs
         }
-        for _ in 0..<12 { recs.append(arec(c)); c += step }
-
-        let withDefault = SleepStaging.classify(from: recs)
-        let withExplicitZero = SleepStaging.classify(from: recs,
-                                                     tuning: SleepStaging.Tuning(rrVarWeight: 0))
-        XCTAssertEqual(withDefault, withExplicitZero,
-                       "rrVarWeight defaults to 0 ⇒ RR is inert and output is unchanged")
+        let withoutRR = SleepStaging.classify(from: night(rr: false))
+        let withRR = SleepStaging.classify(from: night(rr: true))
+        XCTAssertFalse(withRR.isEmpty)
+        XCTAssertEqual(withoutRR, withRR,
+                       "RR carriage is inert at the default rrVarWeight (0): output is byte-identical with vs without RR")
+        // And an explicit Tuning(rrVarWeight: 0) matches the default.
+        XCTAssertEqual(withRR, SleepStaging.classify(from: night(rr: true),
+                                                     tuning: SleepStaging.Tuning(rrVarWeight: 0)))
     }
 
     /// Respiratory-rate variability is a REM cue, mirroring the HRV term. A flat-HR /

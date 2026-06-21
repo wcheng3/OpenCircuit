@@ -76,14 +76,6 @@ SLEEPTYPE_MAP = {
     "SLEEP_AWAKE_IN_BED": "awake",
 }
 
-# Our SleepStage enum -> evaluation class.
-STAGE_TO_CLASS = {
-    "asleepDeep": "deep",
-    "asleepCore": "light",
-    "asleepREM": "rem",
-    "awake": "awake",
-}
-
 
 # --- Tuning: mirrors Swift SleepStaging.Tuning EXACTLY, plus experimental extensions --
 @dataclass
