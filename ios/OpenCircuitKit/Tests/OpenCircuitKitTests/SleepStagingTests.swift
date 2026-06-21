@@ -133,13 +133,16 @@ final class SleepStagingTests: XCTestCase {
 
     // MARK: - HR-aware onset/offset ("still but awake") — the screenshot fix
 
-    /// A long, STILL block of elevated HR before real sleep (e.g. lying in bed / on the
-    /// couch awake) must be TRIMMED out of the in-bed window, not counted as sleep. This
-    /// is the case motion alone misses (no movement → "still" → falsely asleep) and the
-    /// root of the 3-hour over-count: in-bed onset 23:01 vs a real ~02:00.
-    func testStillButElevatedHRPreSleepIsTrimmed() {
+    /// A long, STILL block of elevated HR before real sleep (e.g. lying in bed awake)
+    /// must NOT be counted as ASLEEP — but it IS time in bed, so under RingConn's
+    /// two-window model it is kept as AWAKE-IN-BED, not trimmed out of the in-bed window.
+    /// inBed spans the full bedtime window (pre-sleep included), the core stays the only
+    /// asleep time, and efficiency = asleep / time-in-bed drops below 1.0. This is the
+    /// case motion alone misses (no movement → "still" → falsely asleep).
+    func testStillButElevatedHRPreSleepCountedAsAwakeInBedNotTrimmed() {
         var recs: [BulkRecord] = []
         var c: UInt32 = 0x0c220000
+        let preStart = c
         let preEpochs = 40
         for _ in 0..<preEpochs { recs.append(vrec(c, hr: 78)); c += step }   // still but AWAKE (high HR)
         let onset = c
@@ -149,19 +152,69 @@ final class SleepStagingTests: XCTestCase {
         let segs = SleepStaging.classify(from: recs)
         XCTAssertFalse(segs.isEmpty)
         let inBed = segs.first { $0.stage == .inBed }!
+        let preStartDate = Date(timeIntervalSince1970: Double(Int(preStart) + Command.syncEpoch))
         let onsetDate = Date(timeIntervalSince1970: Double(Int(onset) + Command.syncEpoch))
-        // In-bed window starts at real onset (the low-HR block), NOT the elevated pre-sleep.
-        XCTAssertEqual(inBed.start.timeIntervalSince(onsetDate), 0, accuracy: Double(step) * 2,
-                       "pre-sleep elevated-HR block is trimmed from in-bed")
-        // The pre-sleep block is not counted as asleep: asleep ≈ the 120-epoch core.
+        // (a) in-bed spans the FULL bedtime window: it starts at the FIRST epoch (pre-sleep
+        // included), NOT the trimmed onset.
+        XCTAssertEqual(inBed.start.timeIntervalSince(preStartDate), 0, accuracy: Double(step) * 2,
+                       "in-bed spans the full bedtime window, pre-sleep included")
+        // (b) the key invariant: the pre-sleep block is STILL not asleep — asleep ≈ the core.
         let s = SleepStaging.summary(segs)
         let coreMin = Double(120 * Int(step)) / 60
         XCTAssertEqual(Double(s.minutes.asleep), coreMin, accuracy: 30,
                        "asleep reflects the real core, not the pre-sleep wake")
-        // None of the trimmed pre-sleep time leaks back as an Awake segment.
-        for seg in segs where seg.stage != .inBed {
-            XCTAssertGreaterThanOrEqual(seg.start, inBed.start)
-        }
+        // (c) the pre-sleep span surfaces as AWAKE-IN-BED (not dropped): an awake segment
+        // starts at the first epoch and runs up to onset.
+        let awakeSegs = segs.filter { $0.stage == .awake }
+        XCTAssertTrue(awakeSegs.contains {
+            abs($0.start.timeIntervalSince(preStartDate)) < Double(step) * 2 &&
+            $0.end <= onsetDate.addingTimeInterval(Double(step) * 2)
+        }, "pre-sleep wake-in-bed is an awake segment, not trimmed away")
+        // (d) efficiency is now < 1 (it was 1.0 when pre-sleep was trimmed out of in-bed).
+        XCTAssertLessThan(s.efficiency, 1.0, "in-bed wake pulls efficiency below 100%")
+        // Partition holds: in-bed == asleep + awake.
+        XCTAssertEqual(s.inBed, s.totalAsleep + s.awake, accuracy: Double(step))
+    }
+
+    /// Two-window model end to end: still-but-awake time in bed BEFORE onset and AFTER
+    /// final wake, bracketing a sleep core. All three are time-IN-BED; only the core is
+    /// asleep, so efficiency = asleep / time-in-bed lands in a plausible 0.6–0.8 band and
+    /// in-bed partitions exactly into asleep + awake (pre + post wake both counted).
+    func testStillAwakePrePostSleepGivesPlausibleEfficiency() {
+        var recs: [BulkRecord] = []
+        var c: UInt32 = 0x0c220000
+        for _ in 0..<8 { recs.append(arec(c)); c += step }                    // up, before bed (outside block)
+        let bedStart = c
+        for _ in 0..<30 { recs.append(vrec(c, hr: 78)); c += step }           // in bed, awake, still
+        for _ in 0..<120 { recs.append(vrec(c, hr: 54)); c += step }          // asleep core
+        for _ in 0..<30 { recs.append(vrec(c, hr: 78)); c += step }           // awake in bed, still
+        let bedEnd = c
+        for _ in 0..<8 { recs.append(arec(c)); c += step }                    // got up (outside block)
+
+        let segs = SleepStaging.classify(from: recs)
+        XCTAssertFalse(segs.isEmpty)
+        let s = SleepStaging.summary(segs)
+
+        // Only the 120-epoch core counts as asleep; the 60 still-but-awake epochs do not.
+        let coreMin = Double(120 * Int(step)) / 60
+        XCTAssertEqual(Double(s.minutes.asleep), coreMin, accuracy: 30,
+                       "only the core counts as asleep, not the still-but-awake tails")
+        // efficiency = asleep / time-in-bed ≈ 120 / 180 = 0.67.
+        XCTAssertGreaterThan(s.efficiency, 0.6, "efficiency includes in-bed wake → < 1")
+        XCTAssertLessThan(s.efficiency, 0.8, "two awake tails pull efficiency down to ~0.67")
+        // In-bed partitions exactly into asleep + awake.
+        XCTAssertEqual(s.inBed, s.totalAsleep + s.awake, accuracy: Double(step))
+        // In-bed spans the full bedtime window (both still-awake tails).
+        let inBed = segs.first { $0.stage == .inBed }!
+        let bedStartDate = Date(timeIntervalSince1970: Double(Int(bedStart) + Command.syncEpoch))
+        let bedEndDate = Date(timeIntervalSince1970: Double(Int(bedEnd) + Command.syncEpoch))
+        XCTAssertEqual(inBed.start.timeIntervalSince(bedStartDate), 0, accuracy: Double(step) * 2,
+                       "in-bed starts at bedtime, not onset")
+        XCTAssertEqual(inBed.end.timeIntervalSince(bedEndDate), 0, accuracy: Double(step) * 2,
+                       "in-bed ends at final get-up, not last-asleep")
+        // Both a pre-sleep and a post-wake awake-in-bed segment exist.
+        XCTAssertGreaterThanOrEqual(segs.filter { $0.stage == .awake }.count, 2,
+                                    "pre- and post-sleep wake-in-bed both present")
     }
 
     /// A sustained HR elevation in the MIDDLE of sleep with NO motion (lying still, eyes

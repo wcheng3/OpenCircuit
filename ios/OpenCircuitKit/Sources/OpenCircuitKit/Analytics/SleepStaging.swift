@@ -24,7 +24,9 @@
 // still-block alone counts pre-sleep / quiet-morning wakefulness as sleep, so the
 // in-bed window starts hours early and a low-movement morning wake is missed. Sleep
 // ONSET/OFFSET are then the start of the first, and end of the last, SUSTAINED asleep
-// run; leading/trailing awake is trimmed out of the in-bed window. (REM and quiet wake
+// run; leading/trailing in-bed time outside that span is kept as AWAKE-IN-BED (it is
+// time in bed, just not asleep — RingConn's two-window model, efficiency = asleep /
+// time-in-bed), never counted as sleep. (REM and quiet wake
 // overlap in HR, so the wake margin is set deliberately wide — above REM elevation —
 // and short HR-only awake runs erode back to asleep so a REM bump can't punch a hole.)
 //
@@ -279,19 +281,34 @@ public enum SleepStaging {
         }
         smooth(&stages, tuning)
 
-        // --- Merge consecutive same-stage epochs into segments ---------------------
-        var segs = [SleepSegment(start: windowStart, end: windowEnd, stage: .inBed)]
+        // --- Emit segments tiling the FULL motion (time-in-bed) window -------------
+        // RingConn's two-window model: the BEDTIME window [block.start, block.end] is the
+        // full time in bed; the HR-trimmed SLEEP window [windowStart, windowEnd] is
+        // onset→final-wake. Efficiency = time-asleep / time-in-bed, so inBed MUST be the
+        // full bedtime window — the pre-onset and post-offset spans are awake-IN-BED, not
+        // dropped (dropping them inflated efficiency to ~100%). The returned segments tile
+        // [block.start, block.end] with no gaps/overlaps:
+        //   [inBed(full)] + [pre-awake?] + [onset→offset staged] + [post-awake?].
+        var segs = [SleepSegment(start: block.start, end: block.end, stage: .inBed)]
+        // Pre-sleep awake-in-bed: lying in bed before real onset.
+        if windowStart > block.start {
+            segs.append(SleepSegment(start: block.start, end: windowStart, stage: .awake))
+        }
         var k = 0
         while k < windowIdx.count {
             var j = k
             while j + 1 < windowIdx.count && stages[j + 1] == stages[k] { j += 1 }
-            // Fully tile [windowStart, windowEnd] so staged segments partition the inBed
-            // window (else efficiency is understated): clamp the first segment's start to
+            // Fully tile [windowStart, windowEnd] so staged segments partition the sleep
+            // window (else efficiency is mis-stated): clamp the first segment's start to
             // windowStart and the last segment's end to windowEnd.
             let segStart = (k == 0) ? windowStart : rows[windowIdx[k]].time
             let segEnd = (j + 1 < windowIdx.count) ? rows[windowIdx[j + 1]].time : windowEnd
             segs.append(SleepSegment(start: segStart, end: min(segEnd, windowEnd), stage: stages[k]))
             k = j + 1
+        }
+        // Post-wake awake-in-bed: lingering in bed after the final wake.
+        if block.end > windowEnd {
+            segs.append(SleepSegment(start: windowEnd, end: block.end, stage: .awake))
         }
         return segs
     }
