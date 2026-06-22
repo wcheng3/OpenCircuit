@@ -436,10 +436,13 @@ final class RingScanner: NSObject {
                     // automatic syncs never refreshed daytime SpO₂.
                     session.syncHistory()
                     didDrain = true
-                } else if session.syncing == false && !startedLiveRead {
+                } else if session.syncing == false && !startedLiveRead && !session.isInSleepWindow {
                     // Backlog committed — now a quick optical HR read (syncAll → empty → fast lock),
                     // NOT user-initiated so any prior live HR stays until a fresh one locks. The
                     // extended background timeout gives this poll a real budget past its warm-up (#45 A).
+                    // Skipped in the sleep window: a live read opens `syncAll` (FFFFFFFF), whose
+                    // resume-pointer effect is the 🟡 backlog-shredder risk (PROTOCOL.md §3) — so an
+                    // overnight BGTask leaves the ring fully alone to log the night for one morning sync.
                     session.startMonitoring(mode: .hr, userInitiated: false, quickLiveRead: true)
                     startedLiveRead = true
                 }

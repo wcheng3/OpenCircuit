@@ -176,6 +176,19 @@ opens at ≈now first (the official app OR us) drains the backlog and advances i
 with nothing. (This is why overnight sleep "vanished" — even after the cursor fix, a competing
 official-app sync can still win the one-time backlog.)
 
+> **🟢 SELF-contention confirmed on-device (night of 2026-06-21→22, device unified log).** The other
+> contender does NOT have to be the official app — it can be **us**. With OpenCircuit the sole syncer
+> (no official app running), our own keepalive `periodic history drain` opened at cursor≈now every
+> ~90 min ALL NIGHT; each open advanced the shared resume pointer past the night, so the morning had
+> no backlog to hand off. The whole night drained as **~12 epochs total** (1–3 per drain), every sync
+> `sleepSegs=0`, and the Sleep card silently held the prior night's value. The earlier "~4.75 h buffer
+> overflow" rationale for draining overnight is **wrong for the sleep channel** — §3 above shows the
+> first open drained a **19-day** backlog in one shot, so the ring buffers history for days, not hours.
+> **Fix (2026-06-22):** OpenCircuit now goes quiet inside the user's sleep window — NO history drains and
+> NO `syncAll` live reads (it keeps only the `07 00 00` fetch heartbeat, which doesn't touch the
+> history pointer, so skin temp + the wear gate still stream) — and does ONE big drain after the window
+> ends, mirroring the official app's morning sync. See `RingSession.isInSleepWindow`.
+
 **The fix in OpenCircuit:** (1) history/overnight opens use `Command.syncUpToNow()`
 (cursor = `floor(now) − epoch`), exactly the app's history behaviour — this part is solid (the
 capture proves cursor≈now drains, and lower-bound is ruled out, so it can't return empty). (2)
