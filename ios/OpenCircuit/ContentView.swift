@@ -236,10 +236,9 @@ struct ContentView: View {
             handleForegroundActivation()
             return
         }
-        // Respect the Sync button's guards: never fight a live read / #99 probe / in-flight sync,
-        // and a not-streaming ring would sync nothing (#54).
-        guard !session.syncing, !session.monitoring, !session.probing,
-              !session.notStreaming else { return }
+        // Respect the Sync button's guards: never fight a live read / in-flight sync, and a
+        // not-streaming ring would sync nothing (#54).
+        guard !session.syncing, !session.monitoring, !session.notStreaming else { return }
         session.syncHistory()
         // `syncHistory()` latches `syncing` from inside its own Task, so wait briefly for it to
         // start, then hold until it finalizes (bounded by syncHistory's 45 s watchdog; the extra
@@ -785,7 +784,7 @@ struct ContentView: View {
             freshnessRow
             Divider()
             Button {
-                session?.syncHistory()
+                session?.syncHistory()    // drains both channels: 0x00 sleep + 0x03 all-day (daytime SpO₂)
             } label: {
                 Label(session?.syncing == true ? "Syncing…" : "Sync from ring",
                       systemImage: "arrow.triangle.2.circlepath")
@@ -794,7 +793,6 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .disabled(session?.ready != true || session?.syncing == true
                       || session?.monitoring == true        // stop live before syncing
-                      || session?.probing == true           // a #99 stream probe owns the link
                       || session?.notStreaming == true)     // a not-streaming ring would sync nothing (#54)
 
             if session?.monitoring == true {
@@ -899,54 +897,9 @@ struct ContentView: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 4)
-                    Divider()
-                    allDayProbeSection
                 }
             } label: {
                 Text("Debug — last frame").font(.subheadline.weight(.medium))
-            }
-        }
-    }
-
-    /// #99 — on-device probe for the all-day HR/SpO₂ sync streams. Sweeps the `0x02` sync-open
-    /// `byte[6]` (DataSyncType) selector and shows each selector's raw responses so the wire format
-    /// can be ground-truthed. A capture/RE aid (the values are NOT decoded into health metrics yet).
-    private var allDayProbeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("All-day HR/SpO₂ stream probe (#99)").font(.subheadline.weight(.medium))
-            Text("Sweeps the sync-open byte[6] selector to find the HrSync/Spo2Sync stream. Pauses live/sync for ~45 s; read the per-selector opcodes below (a NOVEL opcode is the all-day stream).")
-                .font(.caption2).foregroundStyle(.secondary)
-            Button {
-                session?.probeAllDayStreams()
-            } label: {
-                Label(session?.probing == true ? "Probing…" : "Probe all-day streams",
-                      systemImage: "antenna.radiowaves.left.and.right")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .disabled(session?.ready != true || session?.probing == true
-                      || session?.syncing == true || session?.monitoring == true
-                      || session?.notStreaming == true)
-            if let report = session?.probeReport {
-                Text(report)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            ForEach(session?.probeResults ?? []) { r in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(format: "0x%02x", r.selector) + (r.sawAck ? " ACK✓" : " no-ACK")
-                         + " · op[" + r.opcodes.map { String(format: "%02x", $0) }.joined(separator: " ") + "]")
-                        .font(.caption2.monospaced().weight(.medium))
-                    // Every captured raw frame (up to the cap) — for a novel HR/SpO₂ stream this is
-                    // the record-byte evidence to ground-truth, so show them all, not just the first.
-                    ForEach(Array(r.sampleFrames.enumerated()), id: \.offset) { _, frame in
-                        Text(frame).font(.system(size: 9).monospaced()).foregroundStyle(.secondary)
-                    }
-                }
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
