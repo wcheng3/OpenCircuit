@@ -577,12 +577,21 @@ final class RingSession: NSObject {
                     // session drains shortly after (re)connect (lastDrainAt nil ⇒ due) yet a flapping
                     // link can't re-drain more often than the interval. Safe to repeat because
                     // `finalizeSync` re-stitches the night from the EpochArchive union.
-                    let isNight = self.nightWindow?.contains(Date()) ?? false
                     let saver = UserDefaults.standard.bool(forKey: Self.batterySaverEnabledKey)
-                    if self.gotDataFrame,
+                    // Drain history on a cadence — but NEVER inside the sleep window. A history open
+                    // (`02 .. cursor≈now ..`) advances the ring's SINGLE resume pointer (PROTOCOL.md §3
+                    // "Contention"); draining every ~90 min overnight kept advancing it past the night,
+                    // so the morning had no backlog left to hand off (device log 06-22: ~12 sleep epochs
+                    // ALL NIGHT, every drain sleepSegs=0). The official app never syncs overnight — it
+                    // does ONE big morning sync of the whole night — so we leave the backlog untouched in
+                    // the window and let the first drain AFTER it (daytime cadence) pull the night whole.
+                    // The `fetch` heartbeat still fires through the night: it only reads the 0x10/0x87
+                    // descriptor (steps/temp/battery) and does NOT touch the history pointer, so skin
+                    // temp (#69) and the wear gate keep their overnight stream.
+                    if self.gotDataFrame, !self.isInSleepWindow,
                        HistoryDrainCadence.isDue(lastDrainAt: self.epochArchiveStore.lastDrainAt,
-                                                 now: Date(), isNight: isNight, batterySaver: saver) {
-                        ringLog.notice("sync: periodic history drain (keep the ring's ~4.75 h buffer emptied)")
+                                                 now: Date(), isNight: false, batterySaver: saver) {
+                        ringLog.notice("sync: periodic history drain (daytime backlog; overnight left for one morning sync)")
                         self.syncHistory()
                     } else {
                         self.write(Command.fetch)   // 07 00 00 → fresh 0x10/0x87 descriptor
@@ -664,7 +673,11 @@ final class RingSession: NSObject {
     /// measurement, a sync, the live-enter drain, or a workout (which owns the link and must not be
     /// torn down by an auto-measure firing mid-session).
     private var idleForAutoMeasure: Bool {
-        ready && !monitoring && !livePreparing && syncTask == nil && !workoutHolding
+        // `!isInSleepWindow`: an auto-measure enters live mode, which opens a sync and can advance the
+        // ring's resume pointer (syncAll's pointer effect is the 🟡 backlog-shredder risk, PROTOCOL.md
+        // §3) — exactly what we must avoid overnight so the night's backlog survives for one morning
+        // sync. Overnight HR/SpO₂ come from the synced sleep epochs anyway, so nothing is lost.
+        ready && !monitoring && !livePreparing && syncTask == nil && !workoutHolding && !isInSleepWindow
     }
 
     /// Next sleep between auto-measure cycles: the base interval while worn, exponentially backed
@@ -766,6 +779,27 @@ final class RingSession: NSObject {
             nightWindow = DateInterval(start: dayStart, end: dayStart.addingTimeInterval(6 * 3600))
         }
         nightWindowRefreshedAt = Date()
+    }
+
+    /// Whether `now` falls inside the user's sleep window — the gate that suppresses AUTOMATIC
+    /// history drains overnight (see `syncHistory(manual:)`, the keepalive loop, and
+    /// `idleForAutoMeasure`). A history open is `02 .. cursor≈now ..`, which advances the ring's
+    /// SINGLE resume pointer (PROTOCOL.md §3 "Contention"); draining every ~90 min through the night
+    /// kept advancing that pointer past the night, so by morning the ring had no backlog to hand off
+    /// (device log 06-22: ~12 sleep epochs the WHOLE night, every drain `sleepSegs=0` → the stale
+    /// Sleep card). The official app never syncs overnight — it does ONE big morning sync of the whole
+    /// night — and this matches it. Prefers the resolved `nightWindow`; falls back to the stored
+    /// manual/default schedule so the gate still holds before the async window resolves (e.g. a cold
+    /// background drain). MANUAL user syncs bypass this entirely (user intent wins).
+    var isInSleepWindow: Bool {
+        if let w = nightWindow { return w.contains(Date()) }
+        let d = UserDefaults.standard
+        SleepScheduleDefaults.register(d)
+        guard let w = SleepWindow.interval(
+            bedMinutes: d.integer(forKey: SleepScheduleDefaults.bedMinutes),
+            wakeMinutes: d.integer(forKey: SleepScheduleDefaults.wakeMinutes),
+            nightEndingNear: Date()) else { return false }
+        return w.contains(Date())
     }
 
     /// Persist decoded samples to the local store (the vitals dashboard reads from it, so
@@ -1078,7 +1112,15 @@ final class RingSession: NSObject {
     ///
     /// The official app drains both channels every sync; we previously only pulled `0x00`, so daytime
     /// SpO₂ went stale (the #99 gap — resolved by mining the captures, not a byte[6] selector sweep).
-    func syncHistory() {
+    func syncHistory(manual: Bool = false) {
+        // Automatic drains are SUPPRESSED inside the sleep window so the night's backlog accumulates
+        // untouched for ONE big morning sync (PROTOCOL.md §3 contention — see `isInSleepWindow`). A
+        // manual "Sync from ring" / pull-to-refresh passes `manual: true` and bypasses this; user
+        // intent wins (and a daytime manual sync is unaffected).
+        if !manual, isInSleepWindow {
+            ringLog.notice("sync: SKIP auto-drain — in sleep window; leaving the ring to log the night (morning sync pulls it whole)")
+            return
+        }
         guard syncTask == nil else { return }    // already syncing
         stopLiveMonitoring()                     // live polling would fight the drain
         syncTask = Task { [weak self] in

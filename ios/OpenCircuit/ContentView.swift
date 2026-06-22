@@ -239,7 +239,7 @@ struct ContentView: View {
         // Respect the Sync button's guards: never fight a live read / in-flight sync, and a
         // not-streaming ring would sync nothing (#54).
         guard !session.syncing, !session.monitoring, !session.notStreaming else { return }
-        session.syncHistory()
+        session.syncHistory(manual: true)   // user-initiated: bypass the overnight-quiet gate
         // `syncHistory()` latches `syncing` from inside its own Task, so wait briefly for it to
         // start, then hold until it finalizes. The drain now covers TWO channels (sleep 0x00 +
         // all-day 0x03), each with its own end-marker/quiet/45 s-cap watchdog, so the hold cap is
@@ -786,7 +786,7 @@ struct ContentView: View {
             freshnessRow
             Divider()
             Button {
-                session?.syncHistory()    // drains both channels: 0x00 sleep + 0x03 all-day (daytime SpO₂)
+                session?.syncHistory(manual: true)   // user-initiated: drains both channels (0x00 sleep + 0x03 all-day), bypasses overnight-quiet gate
             } label: {
                 Label(session?.syncing == true ? "Syncing…" : "Sync from ring",
                       systemImage: "arrow.triangle.2.circlepath")
