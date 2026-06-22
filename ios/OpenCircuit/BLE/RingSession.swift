@@ -1084,8 +1084,10 @@ final class RingSession: NSObject {
 
     /// Drain BOTH history channels into `bulkRecords` — `0x00` (sleep/overnight) then `0x03`
     /// (awake/all-day) — and COMMIT the union via `finalizeSync`. Sets `syncing` for the whole
-    /// duration so the frame handler captures pages into `bulkRecords`; the two channels' epochs
-    /// never overlap in time, so they union cleanly in the EpochArchive. `finalizeSync` clears
+    /// duration so the frame handler captures pages into `bulkRecords`. The firmware assigns each
+    /// epoch to exactly ONE channel (🟢 the captures show 0 % counter overlap between `0x00` and
+    /// `0x03`), so the two streams union cleanly in the EpochArchive with no counter collisions —
+    /// the daytime channel never overwrites a sleep epoch's motion/HRV. `finalizeSync` clears
     /// `syncing`/`syncTask` on exit.
     private func performHistoryDrain() async {
         bulkRecords.removeAll()
@@ -1113,11 +1115,13 @@ final class RingSession: NSObject {
 
     /// Open ONE history channel at cursor ≈ now and drain its 0x4c/0x47 pages — the frame handler
     /// folds 0x4c records into `bulkRecords` while `syncing`. Bounded by the channel's `0x50` end
-    /// marker, 3 s of quiet, or a 45 s cap, so a lost marker/write can't hang the sync. `syncDone`/
-    /// `syncQuietTicks` reset per channel so each channel's end-marker is awaited independently.
+    /// marker, by 3 s of quiet AFTER pages have started (a lost end-marker), or a 45 s hard cap, so
+    /// nothing can hang the sync. `syncDone`/`syncQuietTicks` reset per channel so each channel's
+    /// end-marker is awaited independently.
     private func drainChannel(channel: UInt8, label: String) async {
         syncDone = false
         syncQuietTicks = 0
+        let recordsAtStart = bulkRecords.count
         let open = Command.syncUpToNow(channel: channel)
         ringLog.notice("sync: START ch=\(label, privacy: .public) open=\(open.map { String(format: "%02x", $0) }.joined(separator: " "), privacy: .public) (cursor≈now, §3)")
         // Open at cursor ≈ NOW: the ring streams its un-delivered backlog on this channel up to now
@@ -1131,7 +1135,13 @@ final class RingSession: NSObject {
         for tick in 0 ..< 45 {
             try? await Task.sleep(for: .seconds(1))
             if Task.isCancelled { return }
-            if syncDone || syncQuietTicks >= 3 {
+            // Count seconds since the last page (the frame handler zeroes `syncQuietTicks` on every
+            // 0x47/0x4c). The quiet-exit only applies once pages have actually started this channel,
+            // so a slow open can't cut the drain off before the stream begins — an empty channel
+            // exits on its 0x50 (`syncDone`); only a lost 0x50 falls through to the 45 s cap.
+            syncQuietTicks += 1
+            let sawPages = bulkRecords.count > recordsAtStart
+            if syncDone || (sawPages && syncQuietTicks >= 3) {
                 ringLog.notice("sync: ch=\(label, privacy: .public) drained at \(tick)s (done=\(self.syncDone), quiet=\(self.syncQuietTicks), records=\(self.bulkRecords.count))")
                 break
             }

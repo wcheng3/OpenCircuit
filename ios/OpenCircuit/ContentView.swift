@@ -241,13 +241,15 @@ struct ContentView: View {
         guard !session.syncing, !session.monitoring, !session.notStreaming else { return }
         session.syncHistory()
         // `syncHistory()` latches `syncing` from inside its own Task, so wait briefly for it to
-        // start, then hold until it finalizes (bounded by syncHistory's 45 s watchdog; the extra
-        // margin just guards a missed flag flip so the spinner can't hang forever).
+        // start, then hold until it finalizes. The drain now covers TWO channels (sleep 0x00 +
+        // all-day 0x03), each with its own end-marker/quiet/45 s-cap watchdog, so the hold cap is
+        // sized for both; a degraded sync that exceeds it just releases the spinner while the
+        // remaining channel commits in the background (the flag-flip guard, so it can't hang forever).
         for _ in 0 ..< 20 {            // ~1 s: wait for the sync to latch on
             if session.syncing { break }
             try? await Task.sleep(for: .milliseconds(50))
         }
-        for _ in 0 ..< 520 {           // ~52 s cap: hold until the drain finalizes
+        for _ in 0 ..< 950 {           // ~95 s cap: hold until BOTH channels' drain finalizes
             if !session.syncing { break }
             try? await Task.sleep(for: .milliseconds(100))
         }
