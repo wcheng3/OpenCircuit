@@ -626,15 +626,14 @@ The epoch `1577793600` is 2019-12-31 **12:00:00** UTC (noon, not midnight): the 
 across **20 independent sync-open events** spanning 2026-06-13 21:52 UTC through
 2026-06-15 09:11 UTC: decoded cursor time matches capture wall-clock to < 0.5 s in
 every case (max observed delta 0.5 s, median 0.2 s). No timezone-dependent offset.
-`flag` byte[6] (`00`/`03`) is the **history-channel selector** (🟢 from captures; our on-device drain 🟡) — see §5.6.1.
+`flag` byte[6] (`00`/`03`) is the **history-channel selector** (🟢 from captures, verified on-device) — see §5.6.1.
 
-#### 5.6.1 `byte[6]` = history-CHANNEL selector — TWO channels, `0x00` + `0x03` (#99 — mechanism 🟢, our drain 🟡, 2026-06-21)
-**Confidence:** the *mechanism* below is 🟢 — proven by channel-aware mining of the EXISTING captures
-(no new capture needed). What is **not yet verified on-device is 🟡**: that OUR `0x03` open at cursor≈now
-is answered by the ring and streams these pages. The captures show the official *app* draining `0x03`,
-but with ITS OWN incremental cursor, not our ≈now cursor (§3) — and the on-device probe that would have
-confirmed our open is removed in the same change. Verify by syncing on-device and watching daytime SpO₂
-refresh. Across all 14 captures the official app sends **only two** `byte[6]` values,
+#### 5.6.1 `byte[6]` = history-CHANNEL selector — TWO channels, `0x00` + `0x03` (#99 — 🟢 RESOLVED + verified on-device 2026-06-21)
+**Confidence: 🟢 end-to-end.** The mechanism was proven by channel-aware mining of the EXISTING captures
+(no new capture needed), and OUR drain is now **verified on-device**: a pull-to-refresh with `byte[6]=0x03`
+at cursor≈now returned **8 all-day epochs** (Debug card readout "sleep 0 · all-day 8"), confirming the ring
+answers our ≈now open and streams the daytime pages — not just the official app's own-cursor open (§3).
+Across all 14 captures the official app sends **only two** `byte[6]` values,
 `0x00` and `0x03`, and they are **two parallel history channels** — each with its own advancing resume
 cursor, interleaved over the same time span, both delivering `0x4c` epoch + `0x47` PPG pages. The app
 drains **both** every sync; we had hardcoded `0x00`, so we missed everything `0x03` carries.
@@ -653,9 +652,10 @@ steps/activity stay `serverData` (cloud-computed), consistent with #93. The deco
 `HistoryHrSyncInfo`/`HistorySpo2SyncInfo` tables are the app's CLOUD-side mirrors of this `0x4c` data,
 not a distinct wire stream.
 
-**Fix (implemented; on-device verification 🟡 pending):** `syncHistory()` drains both channels via
+**Fix (shipped, verified on-device 2026-06-21):** `syncHistory()` drains both channels via
 `drainChannel(channel:)` — `0x00` then `0x03` (`Command.syncChannelSleep`/`syncChannelAllDay`,
-`syncSince(channel:)`). The all-day SpO₂/HR
+`syncSince(channel:)`) — on EVERY sync path (button, pull-to-refresh, foreground/background auto,
+periodic). The all-day SpO₂/HR
 flow through the existing `BulkSleep` decode → Apple Health (same schema, no new parser).
 `AllDayChannelTests` guards that daytime `0x03` SpO₂ reaches Health as samples but is kept out of sleep
 staging by the `latestNightRecords` overnight gate. The on-device `byte[6]` sweep (`DataSyncProbe`,
