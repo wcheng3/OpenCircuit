@@ -46,6 +46,18 @@ public struct TemperatureSample: Sendable, Equatable {
     }
 }
 
+/// One heart-rate reading on the HR-gate timeline. HR rides the 0x4c epoch head (byte[4], 🟢
+/// ALL-DAY HR; PROTOCOL.md §5.3), so callers build this from the SAME records that feed the
+/// motion timeline — no extra channel is needed. Used to reject an awake-but-still block from sleep.
+public struct HeartRateSample: Sendable, Equatable {
+    public let time: Date
+    public let bpm: Int
+    public init(time: Date, bpm: Int) {
+        self.time = time
+        self.bpm = bpm
+    }
+}
+
 public enum Activity: Equatable, Sendable { case sleep, active }
 
 public struct ActivityPeriod: Equatable, Sendable {
@@ -80,6 +92,23 @@ public struct ActivityPeriod: Equatable, Sendable {
     /// 28 °C is a conservative midpoint. Used ONLY to exclude cold "still" blocks from
     /// sleep (#41), never to add sleep — so a miss costs at worst an unfiltered charger block.
     public static let wornMinTemperatureC: Double = 28.0
+
+    /// HR gate (awake-but-still detection). A still `.sleep` block whose MEDIAN heart rate exceeds
+    /// the night's resting floor by more than `awakeHRMarginBPM` is reclassified `.active`. The
+    /// motion detector is blind to a still-but-AWAKE period — sitting out late, a long sedentary
+    /// evening — because the hand isn't moving, and the wear gate can't catch it (the ring is worn).
+    /// HR can: a real sleep block settles near the night's own resting floor, while an awake-still
+    /// block runs well above it. 🟢 grounded on the 2026-06-23 night, where the app staged a
+    /// 22:22–23:34 "sleep" block whose HR was 97–120 bpm (~35 bpm over the night's ~71 bpm floor)
+    /// while the user was out. Conservative margin so genuine light/REM elevations are never
+    /// rejected; like the wear gate, the HR gate only REMOVES sleep, never adds it.
+    public static let awakeHRMarginBPM = 25
+    /// Low percentile of the night's worn HR used as the resting-floor estimate — self-calibrating
+    /// per person, and robust to a mostly-awake night because it picks the low tail.
+    static let sleepHRFloorPercentile: Double = 0.10
+    /// Minimum HR readings (globally, and inside a block) before the gate will act, so a single
+    /// stray reading can neither set a bogus floor nor flip a block.
+    static let minHRSamplesForGate = 3
 
     private struct Temp { var activity: Activity; var start: Date; var end: Date }
 
@@ -218,16 +247,30 @@ public struct ActivityPeriod: Equatable, Sendable {
         return out
     }
 
-    /// Sleep/Active detection (motion) with a WEAR GATE (#41): any detected `.sleep` block
-    /// whose median skin temperature indicates the ring was off-wrist / on the charger is
-    /// reclassified `.active`, so a perfectly still ring on the nightstand can't masquerade
-    /// as a night of sleep. A `.sleep` block with no temperature coverage is left as
-    /// detected — absence of data is not evidence of being unworn. `temperatureSamples`
-    /// may be unordered and sparse; only readings inside a block are considered.
+    /// Sleep/Active detection (motion) with two post-filters that only ever REMOVE sleep, never add it:
+    ///   • WEAR GATE (#41): a `.sleep` block whose median skin temperature reads off-wrist / on the
+    ///     charger is reclassified `.active`, so a perfectly still ring on the nightstand can't
+    ///     masquerade as a night. A block with no temperature coverage is left as detected — absence
+    ///     of data is not evidence of being unworn.
+    ///   • HR GATE: a still block whose median HR runs well above the night's resting floor (an
+    ///     awake-but-still period — sitting out late, a long sedentary evening) is reclassified
+    ///     `.active`. The ring is WORN here, so the wear gate can't catch it; HR is the discriminator.
+    /// `temperatureSamples` / `heartRateSamples` may be unordered and sparse; only readings inside a
+    /// block are considered, and an empty set makes that gate a no-op.
     public static func detectFromMotion(_ history: [MotionSample],
                                         temperatureSamples: [TemperatureSample],
-                                        wornMinC: Double = wornMinTemperatureC) -> [ActivityPeriod] {
-        let periods = detectFromMotion(history)
+                                        heartRateSamples: [HeartRateSample] = [],
+                                        wornMinC: Double = wornMinTemperatureC,
+                                        awakeHRMargin: Int = awakeHRMarginBPM) -> [ActivityPeriod] {
+        let base = detectFromMotion(history)
+        let wearGated = wearGate(base, temperatureSamples, wornMinC: wornMinC)
+        return heartRateGate(wearGated, heartRateSamples, marginBPM: awakeHRMargin)
+    }
+
+    /// Reclassify a `.sleep` block whose median skin temperature reads unworn (< `wornMinC`) as
+    /// `.active` (#41). A block with no temperature coverage is left as detected.
+    private static func wearGate(_ periods: [ActivityPeriod], _ temperatureSamples: [TemperatureSample],
+                                 wornMinC: Double) -> [ActivityPeriod] {
         guard !temperatureSamples.isEmpty else { return periods }
         return periods.map { p in
             guard p.activity == .sleep else { return p }
@@ -238,6 +281,36 @@ public struct ActivityPeriod: Equatable, Sendable {
             guard !inside.isEmpty else { return p }   // no coverage → trust the motion verdict
             let median = inside[inside.count / 2]
             return median < wornMinC
+                ? ActivityPeriod(activity: .active, start: p.start, end: p.end)
+                : p
+        }
+    }
+
+    /// Reclassify an awake-but-still `.sleep` block (median HR ≫ the night's resting floor) as
+    /// `.active`. The floor is `sleepHRFloorPercentile` of ALL worn HR in the timeline (byte[4] from
+    /// every 0x4c epoch, 🟢). A block with fewer than `minHRSamplesForGate` readings inside it is
+    /// left as detected — too little HR to judge — mirroring the wear gate's "absence ≠ awake". No
+    /// HR at all → no-op (motion-only result unchanged), so this never regresses a night the ring
+    /// reported with sparse/zero HR.
+    private static func heartRateGate(_ periods: [ActivityPeriod], _ hr: [HeartRateSample],
+                                      marginBPM: Int) -> [ActivityPeriod] {
+        guard hr.count >= minHRSamplesForGate else { return periods }
+        // Resting-floor estimate over the DISTINCT HR levels seen tonight, NOT the raw samples: a long
+        // awake-still stretch contributes many high readings that would drag a count-weighted percentile
+        // up and so hide itself. Deduping to levels gives the night's few low readings equal weight, so
+        // the floor tracks the body's lowest sustained level even when highs dominate by count. (On the
+        // 2026-06-23 night this yields ~74 bpm vs ~102 for a raw p10 — the difference between catching
+        // the 108 bpm evening block and missing it.) Block medians below stay count-weighted: "typical
+        // HR in this block" is the right question there, "lowest level reached tonight" the right one here.
+        let levels = Array(Set(hr.map(\.bpm))).sorted()
+        let floor = levels[Int((Double(levels.count - 1) * sleepHRFloorPercentile).rounded())]
+        let threshold = floor + marginBPM
+        return periods.map { p in
+            guard p.activity == .sleep else { return p }
+            let inside = hr.filter { $0.time >= p.start && $0.time <= p.end }.map(\.bpm).sorted()
+            guard inside.count >= minHRSamplesForGate else { return p }
+            let median = inside[inside.count / 2]
+            return median > threshold
                 ? ActivityPeriod(activity: .active, start: p.start, end: p.end)
                 : p
         }
