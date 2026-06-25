@@ -189,6 +189,17 @@ public enum BulkSleep {
         return out
     }
 
+    /// Per-epoch heart-rate timeline (the 0x4c head, byte[4] 🟢) for `detectFromMotion`'s HR gate,
+    /// which rejects an awake-but-still period (a sedentary evening, sitting out late) from sleep.
+    /// Built from the SAME records as `motionTimeline`, so no extra channel is threaded; idle/unworn
+    /// epochs (no `heartRate`) are skipped.
+    public static func heartRateTimeline(from records: [BulkRecord],
+                                         epoch: Int = Command.syncEpoch) -> [HeartRateSample] {
+        records.compactMap { r in
+            r.heartRate.map { HeartRateSample(time: r.date(epoch: epoch), bpm: $0) }
+        }
+    }
+
     /// Restrict `records` to those whose epoch falls within `hint`, or return them
     /// unchanged when no hint is given. Extension point for the sleep-schedule abstraction:
     /// the app can pass the user's bedtime→wake window (see ios/OpenCircuit/SleepSchedule)
@@ -210,7 +221,8 @@ public enum BulkSleep {
                                  epoch: Int = Command.syncEpoch) -> ActivityPeriod? {
         let scoped = Self.records(records, within: hint, epoch: epoch)
         let periods = ActivityPeriod.detectFromMotion(motionTimeline(from: scoped, epoch: epoch),
-                                                      temperatureSamples: temperatures)
+                                                      temperatureSamples: temperatures,
+                                                      heartRateSamples: heartRateTimeline(from: scoped, epoch: epoch))
         // Clustered span (brief awakenings bridged), not just the first/longest fragment — see
         // mainSleepBlock. A drifting Gen-3 floor or a real mid-sleep stir otherwise splits the night.
         return ActivityPeriod.mainSleepBlock(periods)
@@ -244,7 +256,8 @@ public enum BulkSleep {
                                                 temperatures: [TemperatureSample],
                                                 epoch: Int) -> [SleepSegment] {
         let periods = ActivityPeriod.detectFromMotion(motionTimeline(from: scoped, epoch: epoch),
-                                                      temperatureSamples: temperatures)
+                                                      temperatureSamples: temperatures,
+                                                      heartRateSamples: heartRateTimeline(from: scoped, epoch: epoch))
         // Main in-bed block = the clustered sleep span (brief awakenings bridged via maxSleepPause),
         // not just the longest single fragment — so a drift-fragmented Gen-3 night isn't truncated.
         guard let block = ActivityPeriod.mainSleepBlock(periods) else { return [] }
@@ -290,7 +303,8 @@ public enum BulkSleep {
         // for any caller, not only the pre-sorted EpochArchive union.
         let records = records.sorted { $0.counter < $1.counter }
         let periods = ActivityPeriod.detectFromMotion(motionTimeline(from: records, epoch: epoch),
-                                                      temperatureSamples: temperatures)
+                                                      temperatureSamples: temperatures,
+                                                      heartRateSamples: heartRateTimeline(from: records, epoch: epoch))
         let nights = periods.filter {
             $0.activity == .sleep
                 && $0.duration > ActivityPeriod.minSleepDuration

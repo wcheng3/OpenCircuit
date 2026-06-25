@@ -90,4 +90,65 @@ final class SleepDetectionTests: XCTestCase {
                        ActivityPeriod.detectFromMotion(motion),
                        "no temperature coverage -> identical to motion-only (absence ≠ unworn)")
     }
+
+    // MARK: HR gate — awake-but-still rejection (the "sleep while I was out" bug, 2026-06-23)
+
+    /// Still motion across `[startMin, endMin)` at 5-min cadence (reads as sleep, motion-only).
+    private func stillMotion(_ startMin: Int, _ endMin: Int) -> [MotionSample] {
+        stride(from: startMin, to: endMin, by: 5).map {
+            MotionSample(time: base.addingTimeInterval(Double($0) * 60), movement: 1)
+        }
+    }
+    private func hrSeries(_ startMin: Int, _ endMin: Int, bpm: Int) -> [HeartRateSample] {
+        stride(from: startMin, to: endMin, by: 5).map {
+            HeartRateSample(time: base.addingTimeInterval(Double($0) * 60), bpm: bpm)
+        }
+    }
+    /// Is `minute` inside a detected `.sleep` period?
+    private func sleepCovers(_ minute: Int, _ periods: [ActivityPeriod]) -> Bool {
+        let t = base.addingTimeInterval(Double(minute) * 60)
+        return periods.contains { $0.activity == .sleep && $0.start <= t && $0.end >= t }
+    }
+
+    /// The reported failure: a still-but-AWAKE evening (sitting out late, HR ~108) staged as sleep,
+    /// then real low-HR sleep after a buffer gap. Motion-only stages the evening; the HR gate removes
+    /// it and keeps the real block. Models the 2026-06-23 night: evening "sleep" 97–120 bpm, then the
+    /// 00:09→06:29 HR hole (the overnight drain gap), then real sleep ~64 bpm — floor ~64.
+    func testHeartRateGateRejectsAwakeStillEveningBlock() {
+        // 60-min data gap (120→180) > gravityMaxGap → detect() breaks the run, so the two still
+        // blocks are separate periods (no fragile reliance on the motion floor splitting them).
+        let motion = stillMotion(0, 120) + stillMotion(180, 480)
+        let hr = hrSeries(0, 120, bpm: 108) + hrSeries(180, 480, bpm: 64)
+
+        let motionOnly = ActivityPeriod.detectFromMotion(motion, temperatureSamples: [])
+        XCTAssertTrue(sleepCovers(60, motionOnly), "motion-only stages the still evening as sleep")
+
+        let gated = ActivityPeriod.detectFromMotion(motion, temperatureSamples: [], heartRateSamples: hr)
+        XCTAssertFalse(sleepCovers(60, gated), "awake-but-still evening (HR 108 ≫ floor) must not be sleep")
+        XCTAssertTrue(sleepCovers(300, gated), "real low-HR (64 bpm) sleep block survives the gate")
+    }
+
+    /// No regression: a genuinely still, low-HR night stays sleep (median near the floor).
+    func testHeartRateGateKeepsRealLowHRSleep() {
+        let gated = ActivityPeriod.detectFromMotion(stillMotion(0, 300), temperatureSamples: [],
+                                                    heartRateSamples: hrSeries(0, 300, bpm: 60))
+        XCTAssertEqual(gated.first?.activity, .sleep, "uniformly low-HR still night stays sleep")
+    }
+
+    /// No HR coverage → identical to motion-only (absence of HR is not evidence of wakefulness).
+    func testHeartRateGateNoHRLeavesDetectionUnchanged() {
+        let motion = stillMotion(0, 300)
+        XCTAssertEqual(ActivityPeriod.detectFromMotion(motion, temperatureSamples: [], heartRateSamples: []),
+                       ActivityPeriod.detectFromMotion(motion),
+                       "no HR coverage → identical to motion-only")
+    }
+
+    /// Too few HR readings → the gate stays out rather than acting on noise.
+    func testHeartRateGateIgnoresSparseHR() {
+        let motion = stillMotion(0, 300)
+        let hr = [HeartRateSample(time: base, bpm: 120),
+                  HeartRateSample(time: base.addingTimeInterval(60 * 60), bpm: 120)]   // < minHRSamplesForGate
+        XCTAssertEqual(ActivityPeriod.detectFromMotion(motion, temperatureSamples: [], heartRateSamples: hr).first?.activity,
+                       .sleep, "too few HR readings → gate stays out, block remains sleep")
+    }
 }
