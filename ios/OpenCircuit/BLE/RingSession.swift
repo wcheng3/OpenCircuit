@@ -821,16 +821,21 @@ final class RingSession: NSObject {
         let stale = nightWindowRefreshedAt.map { Date().timeIntervalSince($0) > 30 * 60 } ?? true
         guard stale || force else { return }
         if let w = await SleepSchedule.current(forNightEndingNear: Date()) {
-            nightWindow = w
+            nightWindow = w                                   // explicit schedule (HealthKit / manual) wins
+        } else if let learned = learnedNightWindow(nightEndingNear: Date()) {
+            // No explicit schedule (the default state): ADAPT the window to the user's REAL recent
+            // sleep hours, learned from persisted nights. The fixed 22:30→06:30 default below
+            // dropped ALL skin temp for anyone who sleeps later or shifts night to night (skin temp
+            // is live-only — it rides the 0x10/0x87 descriptor, NOT the drainable history, so a
+            // missed window can't be back-filled like HR/HRV/SpO₂). See SleepWindow.habitualInterval.
+            nightWindow = learned
         } else if let interval = SleepWindow.interval(
-            // No real schedule (default state: manual schedule disabled AND no HealthKit
-            // entitlement). Fall back to the registered DEFAULT bed/wake times even though the
-            // manual schedule is disabled — this yields a correct CROSS-MIDNIGHT window (e.g.
-            // last night 22:30 → today 06:30). A naive 00:00–06:00 calendar-day slice would
-            // drop all pre-midnight sleep onset (a 23:00→07:00 sleeper never matches), killing
-            // the feature for every default-config user.
-            bedMinutes: SleepScheduleDefaults.defaultBedMinutes,    // 1350 (22:30)
-            wakeMinutes: SleepScheduleDefaults.defaultWakeMinutes,  // 390 (06:30)
+            // No schedule AND too little history yet (< 3 nights). Fall back to a GENEROUS default
+            // window (not the narrow 22:30→06:30): wide enough that a late/shifted sleeper isn't
+            // clipped before the learned window kicks in. Cross-midnight aware (e.g. last night
+            // 21:30 → today 10:00); a naive calendar-day slice would drop pre-midnight onset.
+            bedMinutes: Self.tempFallbackBedMinutes,    // 1290 (21:30)
+            wakeMinutes: Self.tempFallbackWakeMinutes,  // 600 (10:00)
             nightEndingNear: Date()
         ) {
             nightWindow = interval
@@ -840,6 +845,26 @@ final class RingSession: NSObject {
             nightWindow = DateInterval(start: dayStart, end: dayStart.addingTimeInterval(6 * 3600))
         }
         nightWindowRefreshedAt = Date()
+    }
+
+    /// Generous no-schedule / no-history fallback window for skin-temp capture: bed 21:30, wake
+    /// 10:00. Wider than the manual-schedule default (22:30→06:30) so a late or shifted sleeper
+    /// isn't clipped before enough nights accrue for `learnedNightWindow` to take over.
+    static let tempFallbackBedMinutes = 21 * 60 + 30   // 1290
+    static let tempFallbackWakeMinutes = 10 * 60        // 600
+
+    /// The user's HABITUAL sleep window learned from recent persisted nights' actual onset/wake, so
+    /// skin-temp capture tracks when they REALLY sleep instead of a fixed clock default. Returns nil
+    /// when there's no store or fewer than 3 usable nights (the caller falls back to the generous
+    /// default above). Pure window math lives in `SleepWindow.habitualInterval` (unit-tested).
+    private func learnedNightWindow(nightEndingNear date: Date) -> DateInterval? {
+        guard let store = localStore else { return nil }
+        let summaries = (try? store.recentSleepSummaries(limit: 21)) ?? []
+        let cutoff = date.addingTimeInterval(-21 * 86_400)
+        let recent = summaries.filter { $0.night >= cutoff }
+        let onsets = recent.compactMap { $0.sleepOnset > .distantPast ? $0.sleepOnset : nil }
+        let wakes = recent.compactMap { $0.sleepWake > $0.sleepOnset ? $0.sleepWake : nil }
+        return SleepWindow.habitualInterval(onsets: onsets, wakes: wakes, nightEndingNear: date)
     }
 
     /// Whether `now` falls inside the user's sleep window — the gate that suppresses AUTOMATIC

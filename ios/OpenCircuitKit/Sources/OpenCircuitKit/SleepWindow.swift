@@ -55,6 +55,58 @@ public enum SleepWindow {
         (hour * 60 + minute + minutesPerDay) % minutesPerDay
     }
 
+    /// A HABITUAL sleep window learned from recent nights' ACTUAL onset/wake times — for gating
+    /// overnight capture (skin temp rides the live `0x10/0x87` descriptor and is NOT in the
+    /// drainable history, so it can only be captured in real time, inside a window). A fixed
+    /// clock default (22:30→06:30) silently drops the temp of anyone who sleeps later or shifts
+    /// night to night; this tracks the individual instead.
+    ///
+    /// Each night contributes its onset and wake TIME-OF-DAY. We take a robust MEDIAN of each
+    /// (onsets are unwrapped around local midnight, so a 23:50 and a 00:30 onset average to ~00:10
+    /// rather than to midday), widen by the given margins so a shifted night isn't clipped, then
+    /// build the concrete interval for the night ending near `date` via `interval` (cross-midnight
+    /// aware). Median, not mean, so one fragmented night (a 04:15 onset, an early wake) can't drag
+    /// the window. Returns `nil` when fewer than `minNights` usable nights exist — the caller falls
+    /// back to a fixed default.
+    ///
+    /// - Parameters:
+    ///   - onsets: recent nights' sleep-onset instants (any count; only the time-of-day is used).
+    ///   - wakes: recent nights' final-wake instants.
+    ///   - bedMargin: seconds to START the window BEFORE the median onset (default 1 h).
+    ///   - wakeMargin: seconds to END the window AFTER the median wake (default 1.5 h).
+    ///   - minNights: minimum usable nights before a learned window is trusted (default 3).
+    public static func habitualInterval(onsets: [Date], wakes: [Date],
+                                        nightEndingNear date: Date,
+                                        bedMargin: TimeInterval = 3600,
+                                        wakeMargin: TimeInterval = 5400,
+                                        minNights: Int = 3,
+                                        calendar: Calendar = .current) -> DateInterval? {
+        guard onsets.count >= minNights, wakes.count >= minNights else { return nil }
+        func tod(_ d: Date) -> Int {
+            let c = calendar.dateComponents([.hour, .minute], from: d)
+            return (c.hour ?? 0) * 60 + (c.minute ?? 0)
+        }
+        // Onsets straddle midnight (late evening + small hours), so unwrap times before noon onto
+        // the evening scale before taking the median. Wakes cluster in the morning and never wrap,
+        // so they take a plain median (unwrapBelow 0 ⇒ no value unwraps).
+        let onsetMin = medianMinutes(onsets.map(tod), unwrapBelow: 12 * minutesPerDay / 24)
+        let wakeMin = medianMinutes(wakes.map(tod), unwrapBelow: 0)
+        return interval(bedMinutes: onsetMin - Int(bedMargin / 60),
+                        wakeMinutes: wakeMin + Int(wakeMargin / 60),
+                        nightEndingNear: date, calendar: calendar)
+    }
+
+    /// Median of minutes-since-midnight values, treating any value `< unwrapBelow` as belonging to
+    /// the NEXT day (adds a full day before sorting) so a wrapped cluster (e.g. onsets around
+    /// midnight) averages on a continuous scale; the result is wrapped back into `[0, 1440)`. With
+    /// `unwrapBelow == 0` nothing unwraps (a plain time-of-day median).
+    static func medianMinutes(_ values: [Int], unwrapBelow pivot: Int) -> Int {
+        guard !values.isEmpty else { return 0 }
+        let unwrapped = values.map { $0 < pivot ? $0 + minutesPerDay : $0 }.sorted()
+        let mid = unwrapped[unwrapped.count / 2]
+        return ((mid % minutesPerDay) + minutesPerDay) % minutesPerDay
+    }
+
     /// Whether a detected sleep block looks like OVERNIGHT sleep (as opposed to a daytime nap or
     /// a long sedentary daytime period). Used to gate the persistent nightly sleep summary so a
     /// worn-but-still daytime block (a long meeting, a movie, an afternoon nap > 1 h) that a sync
