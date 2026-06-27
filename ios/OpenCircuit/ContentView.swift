@@ -22,6 +22,9 @@ struct ContentView: View {
     /// and any newly-added sections are appended in canonical order, so a saved order survives app
     /// updates. See `sectionOrder` / `moveSection`.
     @AppStorage("dashboard.sectionOrder") private var sectionOrderRaw = ""
+    /// First-run onboarding gate (#103): false until the user finishes/skips the welcome flow, then
+    /// it never auto-shows again. Re-openable from the profile screen's About section.
+    @AppStorage(OnboardingView.completedKey) private var onboardingCompleted = false
     /// Typed navigation-stack path. Reorderable cards push by appending a `Route` instead of
     /// wrapping in a `NavigationLink`, so the enclosing `List` doesn't draw its own row chevron on
     /// top of each card's custom one.
@@ -96,6 +99,12 @@ struct ContentView: View {
                 // Wire persistence into the scanner/session so the (currently gated)
                 // epoch-sync decoder can persist Layer-A records once enabled. #24
                 scanner.setLocalStore(LocalStore(modelContext))
+            }
+            // First-run onboarding (#103): full-screen on first launch only, until completed/skipped.
+            .fullScreenCover(isPresented: Binding(
+                get: { !onboardingCompleted },
+                set: { if !$0 { onboardingCompleted = true } })) {
+                OnboardingView { onboardingCompleted = true }
             }
             .task {
                 // Reflect any prior Health authorization so the UI shows the mirrored state,
