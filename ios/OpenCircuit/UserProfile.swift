@@ -15,6 +15,9 @@ struct UserProfileSettingsView: View {
     @State private var heightFeetInput = 0
     @State private var heightInchesInput = 0
 
+    /// Presents the onboarding/welcome flow again from About ▸ "How it works" (#103).
+    @State private var showOnboarding = false
+
     // Apple Health connection. Auth lives here so there's ALWAYS a reachable entry point — the
     // dashboard's authorize button is a post-sync nudge that only appears when there's un-synced
     // history. `health` queries the shared HKHealthStore, so its status matches the dashboard's.
@@ -320,6 +323,11 @@ struct UserProfileSettingsView: View {
             Section("About") {
                 LabeledContent("App", value: "OpenCircuit")
                 LabeledContent("Version", value: appVersion)
+                Button {
+                    showOnboarding = true
+                } label: {
+                    Label("How it works", systemImage: "sparkles")
+                }
                 Link(destination: URL(string: Self.privacyPolicyURL)!) {
                     Label("Privacy Policy", systemImage: "hand.raised")
                 }
@@ -333,6 +341,9 @@ struct UserProfileSettingsView: View {
 
         }
         .navigationTitle("User Profile")
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingView { showOnboarding = false }
+        }
     }
 
     // MARK: Goal helpers
