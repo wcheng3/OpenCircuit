@@ -5,7 +5,7 @@ metrics over Bluetooth LE and write them to **Apple Health**. Inspired by
 [openwhoop](https://github.com/bWanShiTong/openwhoop), which does the same for the
 Whoop 4.0.
 
-<a href="https://www.buymeacoffee.com/standardsoftware"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=☕&slug=standardsoftware&button_colour=5F7FFF&font_colour=ffffff&font_family=Bree&outline_colour=000000&coffee_colour=FFDD00" /></a>
+<a href="https://www.buymeacoffee.com/standardsoftware" target="_blank"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=standardsoftware&button_colour=5F7FFF&font_colour=ffffff&font_family=Bree&outline_colour=000000&coffee_colour=FFDD00" alt="Buy me a coffee" height="40"></a>
 
 > **OpenCircuit** is the user-facing name (home screen / store). The Xcode target,
 > the bundle id (`com.standardsoftwaresolutions.opencircuit`), and the `OpenCircuitKit` Swift package
@@ -130,7 +130,7 @@ python -m opencircuit decode-log captures/btsnoop_hci.log   # parse an Android H
 
 OpenCircuit is free and open-source. If it's useful to you, you can support development:
 
-<a href="https://www.buymeacoffee.com/standardsoftware"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=☕&slug=standardsoftware&button_colour=5F7FFF&font_colour=ffffff&font_family=Bree&outline_colour=000000&coffee_colour=FFDD00" /></a>
+<a href="https://www.buymeacoffee.com/standardsoftware" target="_blank"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=standardsoftware&button_colour=5F7FFF&font_colour=ffffff&font_family=Bree&outline_colour=000000&coffee_colour=FFDD00" alt="Buy me a coffee" height="40"></a>
 
 ## Legal / safety
 
