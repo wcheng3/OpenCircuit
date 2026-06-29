@@ -111,6 +111,42 @@ enum HealthAlertDefaults {
     }
 }
 
+/// `@AppStorage`/`UserDefaults` keys + defaults for the optimal-charging limit and the two
+/// low-battery warnings. The settings UI writes these via `@AppStorage`; the engine reads
+/// them here into a pure `BatteryNotifications.Thresholds`. Defaults are registered so the
+/// intended values are returned before the user ever opens settings (mirrors `HealthAlertDefaults`).
+enum BatteryNotificationDefaults {
+    static let chargeLimitEnabled = "battery.chargeLimit.enabled"
+    static let chargeLimitPercent = "battery.chargeLimit.percent"
+    static let lowWarningEnabled = "battery.lowWarning.enabled"
+    static let lowCriticalEnabled = "battery.lowCritical.enabled"
+
+    // Mirror BatteryNotifications.Thresholds so the UI and the pure layer agree out of the box.
+    static let defaultChargeLimitPercent = 80
+    static let defaultLowWarningPercent = 30
+    static let defaultLowCriticalPercent = 20
+
+    static func register(_ d: UserDefaults = .standard) {
+        d.register(defaults: [
+            chargeLimitEnabled: true,
+            chargeLimitPercent: defaultChargeLimitPercent,
+            lowWarningEnabled: true,
+            lowCriticalEnabled: true,
+        ])
+    }
+
+    static func thresholds(_ d: UserDefaults = .standard) -> BatteryNotifications.Thresholds {
+        register(d)
+        return BatteryNotifications.Thresholds(
+            chargeLimitEnabled: d.bool(forKey: chargeLimitEnabled),
+            chargeLimitPercent: d.integer(forKey: chargeLimitPercent),
+            lowWarningEnabled: d.bool(forKey: lowWarningEnabled),
+            lowWarningPercent: defaultLowWarningPercent,
+            lowCriticalEnabled: d.bool(forKey: lowCriticalEnabled),
+            lowCriticalPercent: defaultLowCriticalPercent)
+    }
+}
+
 // MARK: - De-dupe persistence
 
 /// Persists when each `HealthNotification` last fired, so the pure `NotificationGate` can enforce
@@ -318,6 +354,29 @@ struct HealthNotificationCenter {
         store.markFired(fire)
     }
 
+    // MARK: - Optimal charging + low battery
+
+    /// Post the optimal-charge-limit / low-battery notifications that the pure
+    /// `BatteryNotifications.evaluate` decided should fire, routed through the ONE shared gate
+    /// (quiet hours + anti-spam backoff). The caller advances + persists the armed state
+    /// synchronously and passes only the survivors here, so two close-together readings can't
+    /// race on the state. `percent` is the current reading (shown in the low-battery copy).
+    func postBattery(_ candidates: [HealthNotification], percent: Int,
+                     store localStore: LocalStore, now: Date = Date()) async {
+        guard !candidates.isEmpty else { return }
+        let quiet = HealthAlertDefaults.quietHours()
+        let fire = gate.filter(candidates, now: now, lastFired: store.lastFired(), quietHours: quiet)
+        guard !fire.isEmpty, await ensureAuthorized() else { return }
+        // The charge-limit banner shows the configured limit; the low-battery banners show the
+        // current reading. Reuse `HealthAlertHit.value` to carry that number into `copy`.
+        let limit = BatteryNotificationDefaults.thresholds().chargeLimitPercent
+        for n in fire {
+            let value = (n == .chargeLimitReached) ? limit : percent
+            await post(n, hit: HealthAlertHit(notification: n, value: Double(value), time: now))
+        }
+        store.markFired(fire, at: now)
+    }
+
     /// Request notification authorization LAZILY — only the first time there's actually something
     /// to post, so a user who never crosses a threshold is never prompted. These are alerts the
     /// user opted into in Settings, so we request a standard (visible) authorization.
@@ -343,7 +402,8 @@ struct HealthNotificationCenter {
              .skinTempRise, .skinTempDrop, .skinTempFluctuationRise, .skinTempFluctuationDrop,
              .fever:
             return true
-        case .sedentaryReminder, .wearReminder, .bedtimeReminder, .chargingComplete:
+        case .sedentaryReminder, .wearReminder, .bedtimeReminder, .chargingComplete,
+             .chargeLimitReached, .lowBatteryWarning, .lowBatteryCritical:
             return false
         }
     }
@@ -425,6 +485,22 @@ struct HealthNotificationCenter {
         case .chargingComplete:
             return ("Ring fully charged",
                     "Your RingConn ring has reached 100% — disconnect the charger (estimated).")
+        //  optimal charging + low battery — `hit.value` carries the relevant %.
+        case .chargeLimitReached:
+            let limit = hit.map { Int($0.value) } ?? BatteryNotificationDefaults.defaultChargeLimitPercent
+            return ("Charge limit reached",
+                    "Your ring reached your \(limit)% charge limit — unplug it to help preserve "
+                    + "long-term battery health (estimated).")
+        case .lowBatteryWarning:
+            let pct = hit.map { Int($0.value) }
+            return ("Ring battery low",
+                    "Your ring battery is low" + (pct.map { " (\($0)%)" } ?? "")
+                    + " — consider charging it soon.")
+        case .lowBatteryCritical:
+            let pct = hit.map { Int($0.value) }
+            return ("Ring battery very low",
+                    "Your ring battery is very low" + (pct.map { " (\($0)%)" } ?? "")
+                    + " — charge it soon to preserve battery health.")
         }
     }
 }

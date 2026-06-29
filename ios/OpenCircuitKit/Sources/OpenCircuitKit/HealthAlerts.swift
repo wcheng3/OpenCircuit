@@ -36,6 +36,11 @@ public enum HealthNotification: String, CaseIterable, Codable, Sendable {
     case bedtimeReminder   = "reminder.bedtime"
     // #86 — battery charging complete
     case chargingComplete  = "battery.chargingComplete"
+
+    // optimal battery charging
+    case chargeLimitReached = "battery.chargeLimitReached"
+    case lowBatteryWarning  = "battery.lowWarning"
+    case lowBatteryCritical = "battery.lowCritical"
 }
 
 // MARK: - Quiet hours (shared DND window)

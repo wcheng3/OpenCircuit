@@ -44,6 +44,9 @@ struct ContentView: View {
     /// Tracks whether the ring was at 100 % (charged) in the current connection so the
     /// charging-complete notification fires exactly once per charge cycle. (#86)
     @State private var batteryWasFull = false
+    /// Armed state for the optimal-charge-limit + low-battery notifications so each fires
+    /// once per crossing. Advanced by `BatteryNotifications.evaluate` on every battery reading.
+    @State private var batteryNotifyState = BatteryNotifications.State()
     /// Last time the foreground auto-refresh ran a sync; debounces repeated foregrounds.
     @State private var lastForegroundSync: Date?
     /// Minimum spacing between foreground auto-syncs — one bounded refresh per foreground,
@@ -149,17 +152,30 @@ struct ContentView: View {
             .onChange(of: session?.monitoring) { _, monitoring in
                 if monitoring == false { flushHealth() }
             }
-            // Battery: TTE + charging-complete notification (#86).
+            // Battery: TTE + charging-complete (#86) + optimal-charge limit / low-battery
+            // Prefer the confirmed on-charger byte (#61); fall back to the rising-% inference.
             .onChange(of: session?.batteryPercent) { _, pct in
                 guard let pct else { return }
-                let charging = session?.inferredCharging ?? false
+                let charging = (session?.charging ?? false) || (session?.inferredCharging ?? false)
+                let store = LocalStore(modelContext)
                 if BatteryTTE.justReachedFull(percent: pct, inferredCharging: charging,
                                               wasFull: batteryWasFull) {
                     batteryWasFull = true
-                    let store = LocalStore(modelContext)
                     Task { await HealthNotificationCenter().postChargingComplete(store: store) }
                 }
                 if pct < 100 { batteryWasFull = false }
+                // Optimal-charge limit + low-battery warnings (#). Advance the armed state
+                // synchronously (race-free across close readings), then post survivors async.
+                let battery = BatteryNotifications.evaluate(
+                    percent: pct, charging: charging,
+                    thresholds: BatteryNotificationDefaults.thresholds(), state: batteryNotifyState)
+                batteryNotifyState = battery.state
+                if !battery.fire.isEmpty {
+                    Task {
+                        await HealthNotificationCenter()
+                            .postBattery(battery.fire, percent: pct, store: store)
+                    }
+                }
             }
         }
     }

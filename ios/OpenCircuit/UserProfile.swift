@@ -80,6 +80,14 @@ struct UserProfileSettingsView: View {
     @AppStorage(HealthAlertDefaults.quietStartMinutes) private var quietStart = HealthAlertDefaults.defaultQuietStart
     @AppStorage(HealthAlertDefaults.quietEndMinutes) private var quietEnd = HealthAlertDefaults.defaultQuietEnd
 
+    // Battery notifications: optimal-charge limit + low-battery warnings. Keys/defaults
+    // shared with the notification engine via `BatteryNotificationDefaults`.
+    @AppStorage(BatteryNotificationDefaults.chargeLimitEnabled) private var chargeLimitEnabled = true
+    @AppStorage(BatteryNotificationDefaults.chargeLimitPercent)
+        private var chargeLimitPercent = BatteryNotificationDefaults.defaultChargeLimitPercent
+    @AppStorage(BatteryNotificationDefaults.lowWarningEnabled) private var lowWarningEnabled = true
+    @AppStorage(BatteryNotificationDefaults.lowCriticalEnabled) private var lowCriticalEnabled = true
+
     var body: some View {
         Form {
             Section("Profile") {
@@ -279,6 +287,24 @@ struct UserProfileSettingsView: View {
                     }
                 }
                 Text("Reminder quiet hours and backoff use the same settings as health alerts above.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            // MARK: Optimal Battery Charging
+            Section("Battery") {
+                Toggle("Optimal charge limit", isOn: $chargeLimitEnabled)
+                if chargeLimitEnabled {
+                    Stepper(value: $chargeLimitPercent, in: 50...100, step: 5) {
+                        LabeledContent("Notify at", value: "\(chargeLimitPercent)%")
+                    }
+                }
+                Toggle("Low battery warning (\(BatteryNotificationDefaults.defaultLowWarningPercent)%)",
+                       isOn: $lowWarningEnabled)
+                Toggle("Low battery alert (\(BatteryNotificationDefaults.defaultLowCriticalPercent)%)",
+                       isOn: $lowCriticalEnabled)
+                Text("Get notified to unplug once charging reaches your limit (helps preserve "
+                     + "long-term battery health), and when the ring runs low. Uses the same quiet "
+                     + "hours and backoff as the alerts above.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
